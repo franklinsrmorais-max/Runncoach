@@ -1,0 +1,1152 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RunCoach — Plataforma do Professor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#08080E;font-family:'Manrope',sans-serif;color:#F0F0F8}
+    select option{background:#14141E}
+    ::-webkit-scrollbar{width:5px}
+    ::-webkit-scrollbar-track{background:#08080E}
+    ::-webkit-scrollbar-thumb{background:#1E1E2E;border-radius:3px}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes slideIn{from{opacity:0;transform:translateX(-8px)}to{opacity:1;transform:translateX(0)}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes ping{0%{transform:scale(1);opacity:1}75%,100%{transform:scale(2);opacity:0}}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .fade-in{animation:fadeIn .4s ease forwards}
+    .slide-in{animation:slideIn .3s ease forwards}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const C = {
+  bg:"#08080E", surface:"#0F0F18", card:"#161622", border:"#1E1E30",
+  blue:"#4B7BFF", blueD:"#2855DB", orange:"#FF6B35", orangeD:"#FF3D00",
+  green:"#2ECC71", yellow:"#F1C40F", red:"#E74C3C", purple:"#9B59B6",
+  text:"#F0F0F8", muted:"#50507A", light:"#8888AA",
+};
+
+const ZONES_DATA = [
+  {bg:"rgba(46,204,113,.10)",border:"rgba(46,204,113,.25)",color:"#2ECC71",name:"Z1 · Recuperação"},
+  {bg:"rgba(52,152,219,.10)",border:"rgba(52,152,219,.25)",color:"#3498DB",name:"Z2 · Base"},
+  {bg:"rgba(241,196,15,.10)",border:"rgba(241,196,15,.25)",color:"#F1C40F",name:"Z3 · Aeróbico"},
+  {bg:"rgba(231,76,60,.10)",border:"rgba(231,76,60,.25)",color:"#E74C3C",name:"Z4 · Limiar"},
+  {bg:"rgba(155,89,182,.10)",border:"rgba(155,89,182,.25)",color:"#9B59B6",name:"Z5 · VO₂ Máx"},
+];
+
+const s = {
+  card:(x={})=>({background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:20,...x}),
+  input:{background:C.card,border:`1px solid ${C.border}`,borderRadius:10,padding:"11px 14px",
+    color:C.text,fontSize:13,outline:"none",width:"100%",fontFamily:"inherit",transition:"border-color .2s"},
+  label:{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",
+    color:C.muted,marginBottom:5,display:"block"},
+  btn:(v="primary")=>({
+    display:"inline-flex",alignItems:"center",justifyContent:"center",gap:8,
+    padding:"12px 20px",borderRadius:10,border:"none",cursor:"pointer",
+    fontFamily:"inherit",fontSize:13,fontWeight:700,transition:"all .2s",
+    ...(v==="primary"?{background:`linear-gradient(135deg,${C.blue},${C.blueD})`,
+      color:"#fff",boxShadow:"0 6px 20px rgba(75,123,255,.3)"}:
+    v==="success"?{background:"linear-gradient(135deg,#2ECC71,#27AE60)",
+      color:"#fff",boxShadow:"0 6px 20px rgba(46,204,113,.3)"}:
+    v==="danger"?{background:"rgba(231,76,60,.12)",color:C.red,border:"1px solid rgba(231,76,60,.3)"}:
+    v==="orange"?{background:`linear-gradient(135deg,${C.orange},${C.orangeD})`,
+      color:"#fff",boxShadow:"0 6px 20px rgba(255,107,53,.3)"}:
+    {background:C.card,color:C.light,border:`1px solid ${C.border}`}),
+  }),
+};
+
+// ─── FIREBASE SDK SYNC ────────────────────────────────────────
+// Usa Firebase SDK v9 compat — sem problema de CORS, funciona de qualquer lugar.
+
+let _db = null;
+
+function initFirebase(dbUrl) {
+  if (_db) return _db;
+  const app = firebase.initializeApp({ databaseURL: dbUrl }, "runcoach-"+Date.now());
+  _db = firebase.database(app);
+  return _db;
+}
+
+async function fbGet(dbUrl) {
+  const db = initFirebase(dbUrl);
+  const snap = await db.ref("runcoach").get();
+  return snap.val() || {alunos:{}, planos:{}, progresso:{}, config:{}};
+}
+
+async function fbSet(dbUrl, data) {
+  const db = initFirebase(dbUrl);
+  await db.ref("runcoach").set(data);
+  return data;
+}
+
+// Mutex simples para evitar race condition em writes
+let writeQueue = Promise.resolve();
+function safeWrite(fn) {
+  writeQueue = writeQueue.then(fn).catch(()=>{});
+  return writeQueue;
+}
+
+// ─── SHARED UI ────────────────────────────────────────────────
+function Field({label,hint,children}){
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+      <label style={s.label}>{label}</label>
+      {children}
+      {hint&&<span style={{fontSize:11,color:C.muted}}>{hint}</span>}
+    </div>
+  );
+}
+
+function Inp({type="text",placeholder,min,max,value,onChange,style={},disabled}){
+  const [f,setF]=useState(false);
+  return(
+    <input type={type} placeholder={placeholder} min={min} max={max} value={value} onChange={onChange}
+      disabled={disabled} onFocus={()=>setF(true)} onBlur={()=>setF(false)}
+      style={{...s.input,borderColor:f?C.blue:C.border,boxShadow:f?"0 0 0 3px rgba(75,123,255,.1)":"none",...style,
+        opacity:disabled?.6:1}}/>
+  );
+}
+
+function Sel({value,onChange,options,placeholder}){
+  const [f,setF]=useState(false);
+  return(
+    <select value={value} onChange={onChange} onFocus={()=>setF(true)} onBlur={()=>setF(false)}
+      style={{...s.input,borderColor:f?C.blue:C.border,boxShadow:f?"0 0 0 3px rgba(75,123,255,.1)":"none",
+        appearance:"none",cursor:"pointer"}}>
+      <option value="">{placeholder||"Selecione..."}</option>
+      {options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+    </select>
+  );
+}
+
+function Notify({msg,type}){
+  if(!msg)return null;
+  return(
+    <div style={{
+      position:"fixed",top:20,right:20,zIndex:9999,
+      padding:"12px 20px",borderRadius:10,fontSize:13,fontWeight:600,
+      background:type==="success"?"rgba(46,204,113,.95)":type==="error"?"rgba(231,76,60,.95)":"rgba(75,123,255,.95)",
+      color:"#fff",boxShadow:"0 8px 24px rgba(0,0,0,.5)",
+      animation:"fadeIn .3s ease",maxWidth:360
+    }}>{msg}</div>
+  );
+}
+
+// ─── SETUP PANEL ──────────────────────────────────────────────
+function SetupPanel({onConnect}){
+  const [dbUrl,setDbUrl]=useState("");
+  const [nome,setNome]=useState("");
+  const [whatsapp,setWhatsapp]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [err,setErr]=useState("");
+
+  const conectar = async () => {
+    const url = dbUrl.trim().replace(/\/+$/, "");
+    if(!url||!nome.trim()){setErr("Preencha a URL do Firebase e seu nome.");return;}
+    if(!url.includes("firebaseio.com")){setErr("URL inválida. Deve terminar em .firebaseio.com");return;}
+    setLoading(true); setErr("");
+    try {
+      const data = await fbGet(url);
+      if(!data.config?.nomeProfessor){
+        // Primeira vez — inicializa
+        await fbSet(url, {alunos:{}, planos:{}, progresso:{},
+          config:{nomeProfessor:nome.trim(), whatsapp:whatsapp.trim(), criadoEm:new Date().toISOString()}});
+      }
+      const cfg = {dbUrl:url, nome:nome.trim(), whatsapp:whatsapp.trim()};
+      try{localStorage.setItem("runcoach_prof_cfg",JSON.stringify(cfg));}catch{}
+      onConnect(cfg);
+    } catch(e){ setErr("Erro: " + (e?.message || String(e))); }
+    setLoading(false);
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:500}}>
+        <div style={{textAlign:"center",marginBottom:36}}>
+          <div style={{width:64,height:64,borderRadius:16,background:`linear-gradient(135deg,${C.blue},${C.blueD})`,
+            display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:32,
+            boxShadow:"0 12px 32px rgba(75,123,255,.4)",marginBottom:16}}>👨‍🏫</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:28,fontWeight:800,letterSpacing:1}}>
+            Run<span style={{color:C.blue}}>Coach</span>
+          </div>
+          <div style={{fontSize:11,color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginTop:4}}>
+            Plataforma do Professor
+          </div>
+        </div>
+
+        <div style={s.card({padding:28})}>
+          <div style={{background:"rgba(75,123,255,.07)",border:"1px solid rgba(75,123,255,.2)",
+            borderRadius:10,padding:"14px 16px",marginBottom:24,fontSize:12,color:C.light,lineHeight:1.8}}>
+            <strong style={{color:C.blue}}>🔥 Como configurar (1 vez só, 3 minutos):</strong><br/>
+            1. Acesse <a href="https://console.firebase.google.com" target="_blank" style={{color:C.blue}}>console.firebase.google.com</a><br/>
+            2. Clique <strong>"Criar projeto"</strong> → dê um nome → desative Google Analytics → Criar<br/>
+            3. No menu lateral: <strong>Criação → Realtime Database → Criar banco de dados</strong><br/>
+            4. Escolha qualquer região → selecione <strong>"Modo de teste"</strong> → Ativar<br/>
+            5. Copie a URL (ex: <span style={{color:C.orange}}>https://meu-projeto-abc-default-rtdb.firebaseio.com</span>)<br/>
+            6. Cole abaixo e conecte. Compartilhe a mesma URL com seus alunos.
+          </div>
+
+          <div style={{display:"flex",flexDirection:"column",gap:14}}>
+            <Field label="URL do Firebase Realtime Database" hint="Ex: https://meu-projeto-abc-default-rtdb.firebaseio.com">
+              <Inp placeholder="https://meu-projeto-default-rtdb.firebaseio.com"
+                value={dbUrl} onChange={e=>setDbUrl(e.target.value)}
+                style={{fontFamily:"monospace",fontSize:11}}/>
+            </Field>
+            <Field label="Seu Nome (Professor)">
+              <Inp placeholder="Prof. Franklin" value={nome} onChange={e=>setNome(e.target.value)}/>
+            </Field>
+            <Field label="WhatsApp (opcional)" hint="Para contato dos alunos">
+              <Inp placeholder="5511999999999" value={whatsapp} onChange={e=>setWhatsapp(e.target.value)}/>
+            </Field>
+            {err&&<div style={{fontSize:12,color:C.red,background:"rgba(231,76,60,.1)",
+              border:"1px solid rgba(231,76,60,.25)",borderRadius:8,padding:"10px 12px"}}>{err}</div>}
+            <button style={{...s.btn("orange"),width:"100%",marginTop:4}}
+              onClick={conectar} disabled={loading}>
+              {loading?(
+                <span style={{display:"inline-flex",alignItems:"center",gap:8}}>
+                  <span style={{width:14,height:14,border:"2px solid rgba(255,255,255,.3)",
+                    borderTop:"2px solid #fff",borderRadius:"50%",animation:"spin 1s linear infinite",display:"block"}}/>
+                  Conectando...
+                </span>
+              ):"🔥 Conectar ao Firebase"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── CARD PERFIL ALUNO ────────────────────────────────────────
+function PerfilCard({aluno,teste}){
+  const z=teste.zonas;
+  const zonaData=[z.z1,z.z2,z.z3,z.z4,z.z5];
+  return(
+    <div style={s.card({marginBottom:20})}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16,flexWrap:"wrap",gap:8}}>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800}}>📋 Dados do Aluno</div>
+        <span style={{padding:"4px 12px",background:"rgba(46,204,113,.12)",
+          border:"1px solid rgba(46,204,113,.3)",borderRadius:20,fontSize:11,fontWeight:700,color:C.green}}>✅ Recebido</span>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:10,marginBottom:16}}>
+        {[
+          {icon:"👤",label:"Nome",value:aluno.nome},
+          {icon:"📧",label:"E-mail",value:aluno.email||"—"},
+          {icon:"🎂",label:"Idade",value:`${aluno.idade} anos`},
+          {icon:"⚧",label:"Sexo",value:aluno.sexo==="M"?"Masculino":"Feminino"},
+          {icon:"⚖️",label:"Peso / Altura",value:`${aluno.peso}kg · ${aluno.altura}cm`},
+          {icon:"📊",label:"IMC",value:aluno.imc},
+          {icon:"🏃",label:"Nível",value:aluno.nivel},
+          {icon:"📅",label:"Dias/semana",value:`${aluno.dias} dias`},
+          {icon:"🎯",label:"Objetivo",value:aluno.objetivo},
+          {icon:"⏱",label:"Tempo/treino",value:aluno.tempo?`${aluno.tempo} min`:"—"},
+        ].map(({icon,label,value})=>(
+          <div key={label} style={{background:C.surface,border:`1px solid ${C.border}`,
+            borderRadius:10,padding:"10px 12px",display:"flex",gap:8,alignItems:"center"}}>
+            <span style={{fontSize:16}}>{icon}</span>
+            <div>
+              <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1}}>{label}</div>
+              <div style={{fontSize:12,fontWeight:600,marginTop:1}}>{value}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      {aluno.saude?.length>0&&aluno.saude[0]!=="Nenhuma"&&(
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:6}}>Condições de Saúde</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {aluno.saude.map(s=>(
+              <span key={s} style={{padding:"4px 10px",background:"rgba(231,76,60,.1)",
+                border:"1px solid rgba(231,76,60,.25)",borderRadius:20,fontSize:11,color:C.red}}>{s}</span>
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{borderTop:`1px solid ${C.border}`,margin:"16px 0"}}/>
+      <div style={{fontFamily:"'Syne',sans-serif",fontSize:16,fontWeight:800,marginBottom:12}}>🏁 Resultado do Teste de 3km</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
+        {[
+          {label:"Pace 3km",value:teste.paceStr+" /km",color:C.orange},
+          {label:"FC Máxima",value:`${teste.fcMax} bpm`,color:C.red},
+          {label:"FC Repouso",value:`${teste.fcRepouso} bpm`,color:C.blue},
+        ].map(({label,value,color})=>(
+          <div key={label} style={{background:C.surface,border:`1px solid ${C.border}`,
+            borderRadius:10,padding:"12px",textAlign:"center"}}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,color}}>{value}</div>
+            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginTop:3}}>{label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:10}}>Zonas de FC (Karvonen)</div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:8}}>
+        {ZONES_DATA.map((zs,i)=>(
+          <div key={i} style={{background:zs.bg,border:`1px solid ${zs.border}`,borderRadius:10,
+            padding:"10px 6px",textAlign:"center",color:zs.color}}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,lineHeight:1}}>Z{i+1}</div>
+            <div style={{fontSize:9,margin:"3px 0 5px",opacity:.8}}>{zs.name.split("·")[1]?.trim()}</div>
+            <div style={{fontSize:11,fontWeight:700}}>{zonaData[i].min}–{zonaData[i].max}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─── PROGRESSO DO ALUNO (com comprovações) ────────────────────
+function ProgressoAluno({uid, semanas, progresso}){
+  if(!semanas||!progresso)return null;
+
+  const total = semanas.reduce((a,s)=>a+s.treinos.filter(t=>t.tipo!=="descanso").length, 0);
+  const feitos = Object.values(progresso).filter(v=>v.concluido).length;
+  const comComprovacao = Object.values(progresso).filter(v=>v.strava||v.nota);
+  const pct = total>0 ? Math.round(feitos/total*100) : 0;
+  const pctColor = pct>=80?C.green:pct>=40?C.yellow:C.orange;
+
+  const zoneColor={Z1:C.green,Z2:"#3498DB",Z3:C.yellow,Z4:C.red,Z5:C.purple,Misto:C.orange};
+
+  return(
+    <div style={{marginBottom:16}}>
+      <div style={{background:"rgba(46,204,113,.06)",border:"1px solid rgba(46,204,113,.25)",
+        borderRadius:12,padding:"16px 18px",marginBottom:comComprovacao.length>0?10:0}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10,flexWrap:"wrap",gap:8}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",color:C.muted,textTransform:"uppercase"}}>
+            📊 Progresso do Aluno
+          </div>
+          <div style={{display:"flex",gap:12,alignItems:"baseline"}}>
+            <span style={{fontFamily:"'Syne',sans-serif",fontSize:28,fontWeight:800,color:pctColor}}>{pct}<span style={{fontSize:14,fontWeight:600,color:C.muted}}>%</span></span>
+            <span style={{fontSize:12,color:C.muted}}>{feitos}/{total} treinos</span>
+            {comComprovacao.length>0&&(
+              <span style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color:C.blue}}>{comComprovacao.length}<span style={{fontSize:11,color:C.muted,fontFamily:"'Manrope',sans-serif",fontWeight:400}}> comprov.</span></span>
+            )}
+          </div>
+        </div>
+        <div style={{background:"rgba(46,204,113,.15)",borderRadius:20,height:8,overflow:"hidden",marginBottom:6}}>
+          <div style={{width:`${pct}%`,height:"100%",background:`linear-gradient(90deg,${pctColor},${pct>=80?"#27AE60":"#E67E22"})`,transition:"width .6s"}}/>
+        </div>
+        <div style={{fontSize:11,color:C.muted}}>{feitos} concluídos · {total-feitos} restantes</div>
+      </div>
+
+      {comComprovacao.length>0&&(
+        <div style={{background:"rgba(75,123,255,.05)",border:"1px solid rgba(75,123,255,.2)",
+          borderRadius:12,padding:"14px 16px"}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",color:C.blue,textTransform:"uppercase",marginBottom:10}}>
+            📎 Comprovações ({comComprovacao.length})
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {semanas.map((sem,si)=>
+              sem.treinos.map((t,ti)=>{
+                const key=`${si}_${ti}`;
+                const prog=progresso[key];
+                if(!prog||((!prog.strava)&&(!prog.nota)))return null;
+                return(
+                  <div key={key} style={{background:C.surface,border:"1px solid rgba(75,123,255,.2)",
+                    borderRadius:10,padding:"12px 14px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8,flexWrap:"wrap",marginBottom:6}}>
+                      <div>
+                        <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>
+                          Semana {sem.numero} · {t.dia}
+                          {t.zona&&t.zona!=="Descanso"&&(
+                            <span style={{marginLeft:6,color:zoneColor[t.zona]||C.orange}}>{t.zona}</span>
+                          )}
+                        </div>
+                        <div style={{fontWeight:700,fontSize:13}}>{t.titulo||t.tipo}</div>
+                      </div>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        {prog.concluido&&<span style={{padding:"3px 8px",borderRadius:20,fontSize:10,fontWeight:700,
+                          background:"rgba(46,204,113,.12)",color:C.green,border:"1px solid rgba(46,204,113,.3)"}}>✅ Concluído</span>}
+                        {prog.concluidoEm&&<span style={{fontSize:10,color:C.muted}}>{new Date(prog.concluidoEm).toLocaleDateString("pt-BR")}</span>}
+                      </div>
+                    </div>
+                    {prog.strava&&(
+                      <div style={{fontSize:12,color:C.light,marginBottom:4}}>
+                        🔗 <a href={prog.strava} target="_blank" rel="noopener noreferrer"
+                          style={{color:C.blue,textDecoration:"none",wordBreak:"break-all"}}>{prog.strava}</a>
+                      </div>
+                    )}
+                    {prog.nota&&(
+                      <div style={{fontSize:12,color:C.light,background:"rgba(75,123,255,.07)",
+                        border:"1px solid rgba(75,123,255,.15)",borderRadius:8,padding:"8px 10px",marginTop:4,lineHeight:1.6}}>
+                        📝 {prog.nota}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── EDITOR DE TREINOS ────────────────────────────────────────
+const DIAS_SEM=["Segunda","Terça","Quarta","Quinta","Sexta","Sábado","Domingo"];
+const ZONAS=[{v:"Z1",l:"Z1 · Recuperação"},{v:"Z2",l:"Z2 · Base"},{v:"Z3",l:"Z3 · Aeróbico"},
+  {v:"Z4",l:"Z4 · Limiar"},{v:"Z5",l:"Z5 · VO₂ Máx"},{v:"Misto",l:"Misto"},{v:"Descanso",l:"Descanso"}];
+
+const newTreino=(dia="Segunda")=>({
+  dia,tipo:"corrida",titulo:"",zona:"Z2",duracao:"45 min",
+  fc_alvo:"",pace_base:"",aquecimento:"",principal:"",desaquecimento:""
+});
+const newSemana=(n)=>({numero:n,titulo:"",foco:"",treinos:DIAS_SEM.map(d=>({...newTreino(d)}))});
+
+function TreinoEditor({treino,onChange,onRemove,zonaData}){
+  const set=(k,v)=>onChange({...treino,[k]:v});
+  const zoneColor={Z1:C.green,Z2:"#3498DB",Z3:C.yellow,Z4:C.red,Z5:C.purple,Misto:C.orange,Descanso:C.muted};
+  const isRest=treino.tipo==="descanso";
+  return(
+    <div style={{...s.card({marginBottom:10}),opacity:isRest?.75:1,
+      borderColor:isRest?C.border:`${zoneColor[treino.zona]||C.border}55`}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:isRest?0:10}}>
+        <Field label="Dia">
+          <Sel value={treino.dia} onChange={e=>set("dia",e.target.value)}
+            options={DIAS_SEM.map(d=>({v:d,l:d}))} placeholder=""/>
+        </Field>
+        <Field label="Tipo">
+          <Sel value={treino.tipo} onChange={e=>set("tipo",e.target.value)}
+            options={[{v:"corrida",l:"🏃 Corrida"},{v:"descanso",l:"😴 Descanso"},{v:"ativo",l:"🚶 Ativo/Cross"}]} placeholder=""/>
+        </Field>
+        {!isRest&&(
+          <Field label="Zona">
+            <Sel value={treino.zona} onChange={e=>set("zona",e.target.value)} options={ZONAS} placeholder=""/>
+          </Field>
+        )}
+      </div>
+      {!isRest&&(
+        <>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:10}}>
+            <Field label="Título">
+              <Inp placeholder="Rodagem Base" value={treino.titulo} onChange={e=>set("titulo",e.target.value)}/>
+            </Field>
+            <Field label="Distância" hint="Ex: ~5km">
+              <Inp placeholder="~5km" value={treino.distancia||""} onChange={e=>set("distancia",e.target.value)}/>
+            </Field>
+            <Field label="FC Alvo" hint={zonaData?`Z2: ${zonaData.z2?.min||"?"}–${zonaData.z2?.max||"?"} bpm`:""}>
+              <Inp placeholder="130–145 bpm" value={treino.fc_alvo} onChange={e=>set("fc_alvo",e.target.value)}/>
+            </Field>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:10}}>
+            <Field label="Aquecimento (distância)" hint="Ex: 1km trote leve Z1">
+              <Inp placeholder="1km trote leve Z1" value={treino.aquecimento} onChange={e=>set("aquecimento",e.target.value)}/>
+            </Field>
+            <Field label="Pace Base" hint="Ex: 6:20–6:35 min/km">
+              <Inp placeholder="6:20–6:35 min/km" value={treino.pace_base||""} onChange={e=>set("pace_base",e.target.value)}/>
+            </Field>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            <Field label="Descrição do Aquecimento" hint="O que o aluno deve fazer no aquecimento">
+              <textarea value={treino.aquecimentoDesc||""} onChange={e=>set("aquecimentoDesc",e.target.value)}
+                placeholder="Ex: 1km de trote leve Z1. Faça canelinha, chutinho e skipping antes de iniciar."
+                style={{...s.input,resize:"vertical",minHeight:60,fontSize:12}}/>
+            </Field>
+            <Field label="Execução / Parte Principal" hint="Detalhes completos do treino">
+              <textarea value={treino.descricao||treino.principal||""} onChange={e=>set("descricao",e.target.value)}
+                placeholder="Ex: 30 min em Z2 (130–145 bpm). Mantenha ritmo leve — você deve conseguir falar frases curtas..."
+                style={{...s.input,resize:"vertical",minHeight:90,fontSize:12}}/>
+            </Field>
+            <Field label="Zona / Ritmo" hint="Instruções de FC e pace para o aluno">
+              <textarea value={treino.zonaDesc||""} onChange={e=>set("zonaDesc",e.target.value)}
+                placeholder="Ex: Z2 · 130–145 bpm · Pace 6:20–6:35 min/km. Se passar de 145 bpm, reduza o ritmo."
+                style={{...s.input,resize:"vertical",minHeight:60,fontSize:12}}/>
+            </Field>
+            <Field label="Volta calma / Desaquecimento">
+              <textarea value={treino.voltaDesc||treino.desaquecimento||""} onChange={e=>set("voltaDesc",e.target.value)}
+                placeholder="Ex: 400m caminhada + 5 min alongamento de panturrilha e quadríceps."
+                style={{...s.input,resize:"vertical",minHeight:60,fontSize:12}}/>
+            </Field>
+            <Field label="💡 Dica do Professor" hint="Motivação ou orientação extra">
+              <textarea value={treino.dica||""} onChange={e=>set("dica",e.target.value)}
+                placeholder="Ex: Não se preocupe com o ritmo — foque em manter a FC na zona certa."
+                style={{...s.input,resize:"vertical",minHeight:60,fontSize:12}}/>
+            </Field>
+          </div>
+        </>
+      )}
+      <div style={{marginTop:10,textAlign:"right"}}>
+        <button style={{...s.btn("danger"),padding:"5px 12px",fontSize:11}} onClick={onRemove}>Remover</button>
+      </div>
+    </div>
+  );
+}
+
+function SemanaEditor({semana,onChange,zonaData}){
+  const set=(k,v)=>onChange({...semana,[k]:v});
+  const setTreino=(i,t)=>onChange({...semana,treinos:semana.treinos.map((x,xi)=>xi===i?t:x)});
+  const removeTreino=(i)=>onChange({...semana,treinos:semana.treinos.filter((_,xi)=>xi!==i)});
+  const addTreino=()=>onChange({...semana,treinos:[...semana.treinos,newTreino()]});
+  return(
+    <div style={s.card({marginBottom:16,borderColor:"rgba(75,123,255,.2)"})}>
+      <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,marginBottom:12,color:C.blue}}>Semana {semana.numero}</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+        <Field label="Título da semana">
+          <Inp placeholder="Ex: Adaptação" value={semana.titulo} onChange={e=>set("titulo",e.target.value)}/>
+        </Field>
+        <Field label="Foco / Descrição">
+          <Inp placeholder="Ex: Construir base aeróbica" value={semana.foco} onChange={e=>set("foco",e.target.value)}/>
+        </Field>
+      </div>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:10}}>
+        Treinos da Semana ({semana.treinos.length} / 7 dias)
+      </div>
+      {semana.treinos.map((t,i)=>(
+        <TreinoEditor key={i} treino={t} onChange={t=>setTreino(i,t)} onRemove={()=>removeTreino(i)} zonaData={zonaData}/>
+      ))}
+      {semana.treinos.length<7&&(
+        <button style={{...s.btn("ghost"),width:"100%",marginTop:4}} onClick={addTreino}>+ Adicionar Treino</button>
+      )}
+    </div>
+  );
+}
+
+// ─── IA: GERAÇÃO DE PLANO ─────────────────────────────────────
+function calcPaceZona(paceStr, zona) {
+  const parts = paceStr.split(":");
+  const baseSeg = parseInt(parts[0]) * 60 + parseInt(parts[1] || "0");
+  const fator = {Z1:1.30, Z2:1.15, Z3:1.05, Z4:1.00, Z5:0.93, Misto:1.07};
+  const f = fator[zona] || 1.15;
+  const seg = Math.round(baseSeg * f);
+  return `${Math.floor(seg/60)}:${(seg%60).toString().padStart(2,"0")} min/km`;
+}
+function paceRange(paceBase) {
+  const parts = paceBase.replace(" min/km","").split(":");
+  const seg = parseInt(parts[0])*60 + parseInt(parts[1]);
+  const fmt = s => `${Math.floor(s/60)}:${(s%60).toString().padStart(2,"0")}`;
+  return `${fmt(seg-5)}–${fmt(seg+10)} min/km`;
+}
+
+function gerarPlanoIA(aluno, teste) {
+  const nivel = aluno.nivel, dias = parseInt(aluno.dias) || 3, objetivo = aluno.objetivo;
+  const z = teste.zonas, pace = teste.paceStr;
+  const DIAS_LABELS = ["Segunda","Terça","Quarta","Quinta","Sexta","Sábado","Domingo"];
+  const duracaoPorNivel = {sedentario:30, iniciante:40, recreativo:50, intermediario:60, avancado:75};
+  const dur = duracaoPorNivel[nivel] || 45;
+
+  const focosSem = {
+    sedentario: ["Introdução à corrida","Base aeróbica","Consolidação básica","Recuperação ativa"],
+    iniciante:  ["Base aeróbica","Construção de volume","Progressão de ritmo","Consolidação"],
+    recreativo: ["Ajuste de base","Volume moderado","Trabalho de intensidade","Pico e recuperação"],
+    intermediario:["Base específica","Volume alto","Intensidade e limiar","Consolidação e teste"],
+    avancado:   ["Base específica","Volume e ritmo","Intensidade máxima","Afunilamento"],
+  }[nivel] || ["Adaptação","Construção","Progressão","Consolidação"];
+
+  // Monta escala semanal: longo no sábado, resto distribuído
+  function montarEscala(n) {
+    const sem = Array(7).fill("descanso");
+    if(n >= 2) sem[5] = "longo";
+    const slots = [0, 2, 4, 1, 3];
+    const rest = n - (n >= 2 ? 1 : 0);
+    for(let i = 0; i < Math.min(rest, slots.length); i++) sem[slots[i]] = "normal";
+    if(n === 1) { sem[5] = "descanso"; sem[0] = "normal"; }
+    return sem;
+  }
+  const escala = montarEscala(dias);
+
+  // Calcula distância aproximada em km
+  function distKm(minutos, paceMinKm) {
+    const parts = paceMinKm.replace(" min/km","").split(":");
+    const paceSeg = parseInt(parts[0])*60 + parseInt(parts[1]||"0");
+    return (minutos * 60 / paceSeg).toFixed(1);
+  }
+
+  // Monta treino de DESCANSO
+  function mkDescanso(dia) {
+    return {
+      dia, tipo:"descanso", titulo:"Descanso Ativo", zona:"Descanso",
+      distancia:"", aquecimento:"", aquecimentoDesc:"",
+      descricao:"Aproveite para descansar de verdade. Se quiser, faça uma caminhada leve de 20–30 min, alongamento ou mobilidade articular. Evite esforços intensos — é no descanso que o corpo se adapta e fica mais forte.",
+      zonaDesc:"", voltaDesc:"",
+      dica:"Sono de qualidade é parte do treino. Priorize 7–9h de sono nesse dia.",
+      duracao:"", fc_alvo:"", pace_base:"", aquecimento:"", principal:"", desaquecimento:""
+    };
+  }
+
+  // Monta treino LONGO (rodagem longa)
+  function mkLongo(dia, si, fv) {
+    const dl = Math.round(dur * fv * 1.4);
+    const zona = si >= 2 ? "Z3" : "Z2";
+    const zd = zona === "Z2" ? z.z2 : z.z3;
+    const pb = calcPaceZona(pace, zona);
+    const pr = paceRange(pb);
+    const dist = distKm(dl - 15, pb);
+    const aquecDist = nivel === "sedentario" ? "1km" : nivel === "iniciante" ? "1km" : "1,5km";
+    return {
+      dia, tipo: zona === "Z2" ? "longo" : "longo", titulo: si >= 2 ? "Longão Progressivo" : "Corrida Longa",
+      zona, distancia: `~${dist}km`, duracao: `${dl} min`, fc_alvo: `${zd.min}–${zd.max} bpm`, pace_base: pb,
+      aquecimento: `${aquecDist} trote leve Z1`,
+      aquecimentoDesc: `Comece com ${aquecDist} de caminhada/trote muito leve (Z1 — você deve conseguir cantar). Faça canelinha, chutinho e 30 seg de skipping leve antes de iniciar o ritmo de treino.`,
+      descricao: si >= 2
+        ? `Divida o longão em 3 partes:\n• ${Math.round((dl-15)*0.4)} min em Z2 (${z.z2.min}–${z.z2.max} bpm) — ritmo confortável\n• ${Math.round((dl-15)*0.4)} min em Z3 (${z.z3.min}–${z.z3.max} bpm) — acelere gradualmente\n• ${Math.round((dl-15)*0.2)} min em Z4 (${z.z4.min}–${z.z4.max} bpm) — esforço forte\n\nPace geral: ${pr} · Distância total: ~${dist}km`
+        : `Corra ${dl-15} min de forma contínua em Z2 (${zd.min}–${zd.max} bpm). Mantenha o ritmo leve e constante — se estiver difícil falar frases curtas, está rápido demais.\n\nPace alvo: ${pr} · Distância: ~${dist}km\n\nSe necessário, insira 1–2 min de caminhada a cada 15 min.`,
+      zonaDesc: `${zona} · ${zd.min}–${zd.max} bpm · Pace ${pr}\nRitmo: você consegue falar frases curtas sem se sentir ofegante.`,
+      voltaDesc: `800m de trote muito leve (Z1) + 10 min de alongamento completo: panturrilha, quadríceps, isquiotibiais, quadril e lombar.`,
+      dica: si >= 2
+        ? "Longão progressivo: o objetivo é aprender a acelerar quando já está cansado. Não se preocupe se as pernas pesarem no final — isso é normal e é exatamente o estímulo que queremos."
+        : "O longão é o treino mais importante da semana. Nunca sacrifique o ritmo pelo ego — lento e consistente constrói resistência real. Leve água se for mais de 8km.",
+      principal: `${dl-15} min corrida Z2 · Pace ${pr} · ~${dist}km`,
+      aquecimento: `${aquecDist} trote leve Z1`, desaquecimento: "800m trote leve + 10 min alongamento"
+    };
+  }
+
+  // Monta treino NORMAL conforme índice e semana
+  function mkNormal(dia, si, idxN, fv) {
+    const dm = Math.round(dur * fv);
+    const isAvancado = ["intermediario","avancado"].includes(nivel);
+    const aquecDist = nivel === "sedentario" ? "800m" : "1km";
+
+    if(idxN === 1) {
+      // Rodagem base Z2
+      const pb = calcPaceZona(pace, "Z2");
+      const pr = paceRange(pb);
+      const dist = distKm(dm - 10, pb);
+      return {
+        dia, tipo:"rodagem", titulo:"Rodagem Base", zona:"Z2", distancia:`~${dist}km`,
+        duracao:`${dm} min`, fc_alvo:`${z.z2.min}–${z.z2.max} bpm`, pace_base:pb,
+        aquecimento:`${aquecDist} caminhada + 400m trote leve`,
+        aquecimentoDesc:`Caminhe ${aquecDist} em ritmo normal, depois trote 400m muito leve. Faça rotação de tornozelos, quadril e 10 polichinelos antes de começar.`,
+        descricao:`Corra ${dm-10} min de forma contínua em Z2 (${z.z2.min}–${z.z2.max} bpm).\n\nEste é o treino de base — o mais importante para construir motor aeróbico. Resista à tentação de correr mais rápido.\n\nDistância: ~${dist}km · Pace: ${pr}\n\nTeste de conversa: você deve conseguir dizer "estou correndo bem hoje" sem parar para respirar.`,
+        zonaDesc:`Z2 · ${z.z2.min}–${z.z2.max} bpm · Pace ${pr}\nSe o monitor cardíaco passar de ${z.z2.max} bpm, reduza o ritmo imediatamente.`,
+        voltaDesc:`400m de caminhada + 5 min de alongamento (foco em panturrilha e quadríceps).`,
+        dica:"A rodagem base ocupa 60–70% do seu volume total. É chata? Sim. Funciona? Sim. Confie no processo.",
+        principal:`${dm-10} min Z2 (${z.z2.min}–${z.z2.max} bpm) · Pace ${pr}`,
+        aquecimento:`${aquecDist} caminhada + 400m trote`, desaquecimento:"400m caminhada + 5 min alongamento"
+      };
+    }
+
+    if(idxN === 2) {
+      if(si >= 2 && isAvancado) {
+        // Tiros / Tempo Run
+        const pb = calcPaceZona(pace, "Z4");
+        const pr = paceRange(pb);
+        const nTiros = si >= 3 ? 5 : 4;
+        return {
+          dia, tipo:"tiros", titulo:`Tiros ${nTiros}×1km`, zona:"Z4", distancia:`~${5+nTiros}km`,
+          duracao:`${dm} min`, fc_alvo:`${z.z4.min}–${z.z4.max} bpm`, pace_base:pb,
+          aquecimento:"1,5km trote leve Z1–Z2",
+          aquecimentoDesc:`1,5km de trote leve (Z1–Z2). Inclua: canelinha 30m × 3, chutinho atrás 30m × 3, skipping 30m × 2. Os últimos 200m aumente levemente o ritmo para ativar as pernas.`,
+          descricao:`${nTiros} tiros de 1km cada em Z4 (${z.z4.min}–${z.z4.max} bpm).\n\nEstrutura:\n• Tiro 1km em Z4 · Pace ${pr}\n• Recuperação: 400m de trote leve Z1 entre cada tiro\n• Repita ${nTiros} vezes\n\n⚠️ Se não conseguir manter o pace no último tiro, pare — é melhor 3 tiros bem feitos do que 5 ruins.`,
+          zonaDesc:`Z4 · ${z.z4.min}–${z.z4.max} bpm · Pace ${pr}\nFique nessa zona nos tiros. Coração deve estar batendo forte — difícil falar mais de 2–3 palavras.`,
+          voltaDesc:`1km de trote muito leve Z1 (${z.z1.min}–${z.z1.max} bpm) + 8 min de alongamento completo.`,
+          dica:`Não saia rápido demais no primeiro tiro! O pace deve ser igual em todos. Se o 1° foi fácil e o 4° foi impossível, você errou o ritmo.`,
+          principal:`${nTiros}×1km em Z4 · Pace ${pr} · Rec: 400m trote`,
+          aquecimento:"1,5km trote leve", desaquecimento:"1km trote Z1 + 8 min alongamento"
+        };
+      } else if(si >= 1) {
+        // Fartlek ou Tempo Run
+        const pb = calcPaceZona(pace, "Z3");
+        const pr = paceRange(pb);
+        const dist = distKm(dm - 10, pb);
+        return {
+          dia, tipo:"fartlek", titulo:"Fartlek Livre", zona:"Z3", distancia:`~${dist}km`,
+          duracao:`${dm} min`, fc_alvo:`${z.z3.min}–${z.z3.max} bpm`, pace_base:pb,
+          aquecimento:`${aquecDist} trote leve Z2`,
+          aquecimentoDesc:`${aquecDist} de trote em Z2 (${z.z2.min}–${z.z2.max} bpm). Depois: 3 × 20 seg de aceleração progressiva, voltando ao trote entre elas.`,
+          descricao:`${dm-10} min de corrida com variações livres de ritmo (Fartlek).\n\nComo fazer:\n• Corra em Z2 por 3–4 min (ritmo base)\n• Acelere para Z3–Z4 por 1–2 min (até o próximo poste, árvore ou esquina)\n• Volte para Z2 por 2–3 min para recuperar\n• Repita de forma intuitiva durante todo o treino\n\nNão precisa cronometrar os aceleramentos — deixe o corpo guiar!\nDistância: ~${dist}km`,
+          zonaDesc:`Varia entre Z2 (${z.z2.min}–${z.z2.max} bpm) e Z4 (${z.z4.min}–${z.z4.max} bpm). Média esperada: Z3 (${z.z3.min}–${z.z3.max} bpm).`,
+          voltaDesc:`${aquecDist} de trote bem leve + 5 min de alongamento dinâmico.`,
+          dica:"O fartlek é o treino mais divertido da semana. Explore o percurso, jogue com o ritmo e aproveite a liberdade.",
+          principal:`${dm-10} min Fartlek Z2→Z4 · Pace médio ${pr}`,
+          aquecimento:`${aquecDist} trote leve`, desaquecimento:`${aquecDist} trote + 5 min alongamento`
+        };
+      } else {
+        // Corrida moderada Z2–Z3
+        const pb = calcPaceZona(pace, "Z3");
+        const pr = paceRange(pb);
+        const dist = distKm(dm - 10, pb);
+        return {
+          dia, tipo:"rodagem", titulo:"Corrida Moderada", zona:"Z3", distancia:`~${dist}km`,
+          duracao:`${dm} min`, fc_alvo:`${z.z3.min}–${z.z3.max} bpm`, pace_base:pb,
+          aquecimento:`${aquecDist} caminhada + 400m trote`,
+          aquecimentoDesc:`${aquecDist} de caminhada em ritmo normal + 400m de trote leve. Faça 5 elevações de joelho e 5 chutinhos em cada perna.`,
+          descricao:`${Math.round((dm-10)*0.5)} min em Z2 (${z.z2.min}–${z.z2.max} bpm) + ${Math.round((dm-10)*0.5)} min em Z3 (${z.z3.min}–${z.z3.max} bpm).\n\nComece no ritmo leve de Z2 e aumente gradualmente até Z3 na metade do treino. Mantenha Z3 até os últimos 5 min, quando volta para Z2.\n\nDistância: ~${dist}km · Pace: ${pr}`,
+          zonaDesc:`Z2→Z3 · Primeira metade: ${z.z2.min}–${z.z2.max} bpm · Segunda metade: ${z.z3.min}–${z.z3.max} bpm\nPace: ${pr}`,
+          voltaDesc:`400m de caminhada + 5 min de alongamento.`,
+          dica:"Corrida moderada: você sente que está trabalhando, mas ainda não está sofrendo. Se começar a ficar ofegante, reduza o ritmo.",
+          principal:`${dm-10} min Z2→Z3 · Pace ${pr} · ~${dist}km`,
+          aquecimento:`${aquecDist} caminhada + 400m trote`, desaquecimento:"400m caminhada + 5 min alongamento"
+        };
+      }
+    }
+
+    // Treino adicional (3°+) — Regenerativo ou Progressivo
+    if(si >= 2 && dias >= 5) {
+      const pb = calcPaceZona(pace, "Z2");
+      const pr = paceRange(pb);
+      const dist = distKm(dm - 10, pb);
+      return {
+        dia, tipo:"progressivo", titulo:"Treino Progressivo", zona:"Misto", distancia:`~${dist}km`,
+        duracao:`${dm} min`, fc_alvo:`${z.z2.min}–${z.z4.max} bpm`, pace_base:pb,
+        aquecimento:`${aquecDist} trote leve Z1`,
+        aquecimentoDesc:`${aquecDist} de trote muito leve (Z1). Alongamento dinâmico: rotação de quadril, balanço de pernas e 2×20m de skipping.`,
+        descricao:`Corrida progressiva: cada ${Math.round((dm-10)/3)} min acelere uma zona.\n\n• ${Math.round((dm-10)/3)} min em Z2 (${z.z2.min}–${z.z2.max} bpm) · Pace: ${paceRange(calcPaceZona(pace,"Z2"))}\n• ${Math.round((dm-10)/3)} min em Z3 (${z.z3.min}–${z.z3.max} bpm) · Pace: ${paceRange(calcPaceZona(pace,"Z3"))}\n• ${Math.round((dm-10)/3)} min em Z4 (${z.z4.min}–${z.z4.max} bpm) · Pace: ${paceRange(calcPaceZona(pace,"Z4"))}\n\nO objetivo é aprender a acelerar mesmo com as pernas cansadas.\nDistância: ~${dist}km`,
+        zonaDesc:`Progressivo Z2→Z3→Z4. Cadência aumenta a cada bloco. Ritmo final deve ser forte mas sustentável.`,
+        voltaDesc:`800m de trote leve Z1 + 8 min de alongamento completo.`,
+        dica:"Comece SEMPRE mais lento do que parece necessário. A maioria erra começando no ritmo do meio — e não sobra energia para o final.",
+        principal:`Progressivo ${Math.round((dm-10)/3)}min Z2 + ${Math.round((dm-10)/3)}min Z3 + ${Math.round((dm-10)/3)}min Z4`,
+        aquecimento:`${aquecDist} trote Z1`, desaquecimento:"800m trote + 8 min alongamento"
+      };
+    }
+
+    // Recuperação ativa
+    const pb = calcPaceZona(pace, "Z1");
+    const pr = paceRange(pb);
+    const dist = distKm(dm - 10, pb);
+    return {
+      dia, tipo:"regenerativo", titulo:"Recuperação Ativa", zona:"Z1", distancia:`~${dist}km`,
+      duracao:`${dm} min`, fc_alvo:`${z.z1.min}–${z.z1.max} bpm`, pace_base:pb,
+      aquecimento:"400m caminhada",
+      aquecimentoDesc:"400m de caminhada em ritmo normal. Nada de esforço — esse treino começa devagar e termina devagar.",
+      descricao:`${dm-10} min de trote muito leve em Z1 (${z.z1.min}–${z.z1.max} bpm).\n\nEste é o treino mais leve da semana. O objetivo não é performance — é estimular a circulação para remover resíduos metabólicos e acelerar a recuperação.\n\nVocê deve conseguir CANTAR enquanto corre. Se não conseguir, está rápido demais.\n\nDistância: ~${dist}km · Pace: ${pr}`,
+      zonaDesc:`Z1 · ${z.z1.min}–${z.z1.max} bpm · Pace ${pr}\nSe o monitor passar de ${z.z1.max} bpm: caminhe até baixar.`,
+      voltaDesc:`5 min de caminhada + 8 min de alongamento focado em panturrilha, quadríceps e quadril.`,
+      dica:"Não subestime o regenerativo. Corredores que pulam esse treino acumulam fadiga e aumentam o risco de lesão. Lento é permitido — parado não.",
+      principal:`${dm-10} min trote Z1 (${z.z1.min}–${z.z1.max} bpm) · Pace ${pr}`,
+      aquecimento:"400m caminhada", desaquecimento:"5 min caminhada + 8 min alongamento"
+    };
+  }
+
+  const semanas = ["Adaptação","Construção","Progressão","Consolidação"].map((titulo, si) => {
+    const fv = [1, 1.15, 1.3, 1.1][si];
+    let idxN = 0;
+    const treinos = DIAS_LABELS.map((dia, di) => {
+      const tp = escala[di];
+      if(tp === "descanso") return mkDescanso(dia);
+      if(tp === "longo") return mkLongo(dia, si, fv);
+      idxN++;
+      return mkNormal(dia, si, idxN, fv);
+    });
+    return { numero:si+1, titulo, foco:focosSem[si], treinos };
+  });
+
+  return {
+    semanas,
+    analise:`Plano para ${aluno.nome} · ${nivel} · ${objetivo} · ${dias}x/sem · Pace teste: ${pace}/km\n\n📌 Estrutura: Hard/Easy alternados · Sábado = Longão · Aquecimento por distância · Descrições detalhadas incluídas.\n\nZonas calculadas via Método Karvonen com dados reais do teste de 3km.\n\nDica: peça ao aluno abrir cada treino para ver instruções completas.`
+  };
+}
+
+// ─── LISTA DE ALUNOS ─────────────────────────────────────────
+function ListaAlunos({alunos, onSelect, selectedUid, loading, record}){
+  if(loading) return(
+    <div style={s.card({textAlign:"center",padding:28,marginBottom:16})}>
+      <div style={{animation:"spin 1s linear infinite",display:"inline-block",fontSize:24,marginBottom:8}}>⚙️</div>
+      <div style={{fontSize:12,color:C.muted}}>Sincronizando...</div>
+    </div>
+  );
+  if(alunos.length===0) return(
+    <div style={s.card({textAlign:"center",padding:"36px 20px",marginBottom:16})}>
+      <div style={{fontSize:36,marginBottom:10}}>📭</div>
+      <div style={{fontFamily:"'Syne',sans-serif",fontSize:16,fontWeight:800,marginBottom:6}}>Nenhum aluno ainda</div>
+      <div style={{fontSize:12,color:C.light,lineHeight:1.6}}>Aguardando alunos enviarem seus dados.</div>
+    </div>
+  );
+  return(
+    <div style={{marginBottom:16}}>
+      <div style={{fontSize:9,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:8}}>
+        Alunos ({alunos.length})
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:6}}>
+        {alunos.map((a,i)=>{
+          const isSel=selectedUid===a.uid;
+          const plano=record?.planos?.[a.uid];
+          const prog=record?.progresso?.[a.uid]||{};
+          let pct=null;
+          if(plano?.semanas){
+            const total=plano.semanas.reduce((acc,s)=>acc+s.treinos.filter(t=>t.tipo!=="descanso").length,0);
+            const feitos=Object.values(prog).filter(v=>v.concluido).length;
+            pct=total>0?Math.round(feitos/total*100):0;
+          }
+          const pctColor=pct===null?null:pct>=80?C.green:pct>=40?C.yellow:C.orange;
+          return(
+            <button key={i} onClick={()=>onSelect(a)} style={{
+              ...s.card({padding:"10px 14px"}),cursor:"pointer",textAlign:"left",width:"100%",
+              border:`1px solid ${isSel?"rgba(75,123,255,.5)":C.border}`,
+              background:isSel?"rgba(75,123,255,.08)":C.card}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
+                <div style={{fontWeight:700,fontSize:13,color:isSel?C.blue:C.text}}>{a.aluno?.nome||"Aluno"}</div>
+                {pct!==null&&<span style={{fontSize:11,fontWeight:800,color:pctColor,background:`${pctColor}18`,
+                  border:`1px solid ${pctColor}44`,borderRadius:12,padding:"1px 7px"}}>{pct}%</span>}
+              </div>
+              <div style={{fontSize:10,color:C.muted}}>{a.aluno?.objetivo} · {a.aluno?.nivel}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────
+function App(){
+  const [cfg,setCfg]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem("runcoach_prof_cfg")||"null");}catch{return null;}
+  });
+  const [record,setRecord]=useState(null); // dados do bin
+  const [selectedUid,setSelectedUid]=useState(null);
+  const [dados,setDados]=useState(null); // aluno selecionado
+  const [semanas,setSemanas]=useState(null);
+  const [analise,setAnalise]=useState("");
+  const [liberado,setLiberado]=useState(false);
+  const [tab,setTab]=useState("perfil");
+  const [notif,setNotif]=useState(null);
+  const [gerandoIA,setGerandoIA]=useState(false);
+  const [iaTimer,setIaTimer]=useState(0);
+  const [syncing,setSyncing]=useState(false);
+  const [saving,setSaving]=useState(false);
+  const iaRef=useRef(null);
+  const syncRef=useRef(null);
+
+  const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3500);};
+
+  // ── Sync loop: puxa dados do bin a cada 5s
+  const syncPull = useCallback(async () => {
+    if(!cfg) return;
+    try {
+      const data = await fbGet(cfg.dbUrl);
+      setRecord(data);
+      // Atualizar dados do aluno selecionado se mudou
+      if(selectedUid && data.progresso?.[selectedUid] !== undefined){
+        // progresso atualizado automaticamente via record
+      }
+      if(selectedUid && data.planos?.[selectedUid]){
+        const p = data.planos[selectedUid];
+        setSemanas(p.semanas);
+        setAnalise(p.analise||"");
+        setLiberado(true);
+      }
+    } catch(e){}
+  }, [cfg, selectedUid]);
+
+  useEffect(()=>{
+    if(!cfg) return;
+    syncPull();
+    syncRef.current = setInterval(syncPull, 5000);
+    return ()=>clearInterval(syncRef.current);
+  },[cfg, syncPull]);
+
+  const alunos = record ? Object.values(record.alunos||{}) : [];
+  const progressoAluno = (selectedUid && record) ? (record.progresso?.[selectedUid]||{}) : {};
+
+  const selectAluno=(a)=>{
+    const uid=a.uid;
+    setSelectedUid(uid);
+    setDados(a);
+    setTab("perfil");
+    if(record?.planos?.[uid]){
+      const p=record.planos[uid];
+      setSemanas(p.semanas);
+      setAnalise(p.analise||"");
+      setLiberado(true);
+    } else {
+      setSemanas(null); setAnalise(""); setLiberado(false);
+    }
+    notify(`Aluno ${a.aluno?.nome} selecionado!`);
+  };
+
+  const iniciarGeracaoIA=()=>{
+    if(!dados)return;
+    setGerandoIA(true); setIaTimer(3);
+    let t=3;
+    iaRef.current=setInterval(()=>{
+      t--;setIaTimer(t);
+      if(t<=0){
+        clearInterval(iaRef.current);
+        const plano=gerarPlanoIA(dados.aluno,dados.teste);
+        setSemanas(plano.semanas); setAnalise(plano.analise);
+        setGerandoIA(false); setTab("editor");
+        notify("🤖 Plano gerado! Revise e libere.");
+      }
+    },1000);
+  };
+  useEffect(()=>()=>{if(iaRef.current)clearInterval(iaRef.current);},[]);
+
+  const liberarPlano=async()=>{
+    if(!semanas||semanas.some(s=>!s.titulo)){
+      notify("Preencha o título de todas as semanas.","error"); return;
+    }
+    setSaving(true);
+    try {
+      const plano={semanas,analise,whatsapp:cfg.whatsapp||"",liberadoEm:new Date().toISOString()};
+      const latest = await fbGet(cfg.dbUrl);
+      latest.planos = latest.planos||{};
+      latest.planos[selectedUid] = plano;
+      await fbSet(cfg.dbUrl, latest);
+      setRecord(latest);
+      setLiberado(true);
+      notify("🎉 Plano liberado para o aluno!");
+    } catch(e){ notify("Erro ao liberar plano. Tente novamente.","error"); }
+    setSaving(false);
+  };
+
+  const revogarPlano=async()=>{
+    setSaving(true);
+    try {
+      const latest = await fbGet(cfg.dbUrl);
+      if(latest.planos) delete latest.planos[selectedUid];
+      await fbSet(cfg.dbUrl, latest);
+      setRecord(latest);
+      setLiberado(false); setSemanas(null);
+      notify("Plano revogado.","error");
+    } catch(e){ notify("Erro ao revogar.","error"); }
+    setSaving(false);
+  };
+
+  if(!cfg) return <SetupPanel onConnect={setCfg}/>;
+
+  const tabs=[{id:"perfil",label:"📋 Perfil"},{id:"editor",label:"✏️ Editor"},{id:"preview",label:"👁 Preview"}];
+
+  return(
+    <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:"'Manrope',sans-serif",padding:"28px 16px 80px"}}>
+      <div style={{maxWidth:980,margin:"0 auto"}}>
+        <Notify msg={notif?.msg} type={notif?.type}/>
+
+        {/* Header */}
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:32,gap:12,flexWrap:"wrap"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:44,height:44,borderRadius:12,background:`linear-gradient(135deg,${C.blue},${C.blueD})`,
+              display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:"0 8px 24px rgba(75,123,255,.35)"}}>👨‍🏫</div>
+            <div>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,letterSpacing:1}}>
+                Run<span style={{color:C.blue}}>Coach</span>
+              </div>
+              <div style={{fontSize:10,color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginTop:1}}>
+                {cfg.nome?`Prof. ${cfg.nome}`:"Plataforma do Professor"}
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+            {/* Código de Conexão para alunos de qualquer rede */}
+            <div style={{padding:"6px 12px",borderRadius:8,background:"rgba(75,123,255,.1)",border:"1px solid rgba(75,123,255,.3)",
+              fontSize:11,color:C.blue,cursor:"pointer",fontWeight:700,userSelect:"none"}}
+              onClick={()=>{
+                navigator.clipboard?.writeText(cfg.dbUrl);
+                notify("🔥 URL do Firebase copiada! Envie para seus alunos.");
+              }}>
+              🔥 URL Firebase <span style={{opacity:.7,fontWeight:400}}>copiar</span>
+            </div>
+            {cfg.whatsapp&&<div style={{padding:"6px 12px",borderRadius:20,background:"rgba(46,204,113,.12)",
+              border:"1px solid rgba(46,204,113,.25)",fontSize:11,fontWeight:700,color:C.green}}>💬 {cfg.whatsapp}</div>}
+            <button style={{...s.btn("ghost"),padding:"8px 12px",fontSize:11}}
+              onClick={()=>{if(confirm("Desconectar e alterar configurações?"))setCfg(null);}}>⚙️</button>
+            <div style={{padding:"6px 14px",borderRadius:20,background:"rgba(75,123,255,.12)",
+              border:"1px solid rgba(75,123,255,.25)",fontSize:11,fontWeight:700,color:C.blue}}>🎓 PROFESSOR</div>
+          </div>
+        </div>
+
+        {gerandoIA&&(
+          <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.85)",zIndex:9000,
+            display:"flex",alignItems:"center",justifyContent:"center"}}>
+            <div style={{...s.card({padding:40,textAlign:"center",maxWidth:360})}}>
+              <div style={{fontSize:48,marginBottom:16,animation:"spin 2s linear infinite",display:"inline-block"}}>🤖</div>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,marginBottom:8}}>Professor IA trabalhando...</div>
+              <div style={{fontSize:13,color:C.light,lineHeight:1.6,marginBottom:20}}>Analisando perfil e criando plano de 4 semanas.</div>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:56,fontWeight:800,color:C.blue}}>{iaTimer}</div>
+              <div style={{fontSize:12,color:C.muted,marginTop:4}}>segundos</div>
+            </div>
+          </div>
+        )}
+
+        <div style={{display:"grid",gridTemplateColumns:"240px 1fr",gap:20,alignItems:"flex-start"}}>
+          {/* Sidebar */}
+          <div>
+            <ListaAlunos alunos={alunos} onSelect={selectAluno} selectedUid={selectedUid} loading={!record} record={record}/>
+            <div style={s.card({background:C.surface,padding:16})}>
+              <div style={{fontSize:9,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:12}}>Como funciona</div>
+              {[
+                {n:"01",t:"Compartilhe o ID",d:"Clique no ID no topo para copiar e envie aos alunos."},
+                {n:"02",t:"Aluno preenche dados",d:"Perfil + teste de 3km na plataforma do aluno."},
+                {n:"03",t:"Gere o plano com IA",d:"Revise e ajuste os treinos."},
+                {n:"04",t:"Libere para o aluno",d:"Acompanhe progresso e comprovações aqui."},
+              ].map(({n,t,d})=>(
+                <div key={n} style={{display:"flex",gap:10,alignItems:"flex-start",marginBottom:10}}>
+                  <div style={{width:24,height:24,borderRadius:12,background:"rgba(75,123,255,.12)",
+                    border:"1px solid rgba(75,123,255,.25)",flexShrink:0,display:"flex",alignItems:"center",
+                    justifyContent:"center",fontFamily:"'Syne',sans-serif",fontSize:10,fontWeight:800,color:C.blue}}>{n}</div>
+                  <div><div style={{fontSize:11,fontWeight:700,marginBottom:1}}>{t}</div>
+                  <div style={{fontSize:10,color:C.muted,lineHeight:1.5}}>{d}</div></div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Painel principal */}
+          <div>
+            {!dados?(
+              <div style={s.card({textAlign:"center",padding:"64px 24px"})}>
+                <div style={{fontSize:48,marginBottom:12}}>👈</div>
+                <div style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,marginBottom:8}}>Selecione um aluno</div>
+                <div style={{fontSize:13,color:C.light}}>Clique em um aluno na lista para ver seus dados e criar o plano.</div>
+              </div>
+            ):(
+              <div className="fade-in">
+                {/* Status */}
+                <div style={{display:"flex",gap:10,marginBottom:16,flexWrap:"wrap",alignItems:"center"}}>
+                  <div style={{flex:1,background:liberado?"rgba(46,204,113,.08)":"rgba(255,107,53,.08)",
+                    border:`1px solid ${liberado?"rgba(46,204,113,.3)":"rgba(255,107,53,.3)"}`,
+                    borderRadius:10,padding:"10px 14px",display:"flex",gap:10,alignItems:"center"}}>
+                    <div style={{width:8,height:8,borderRadius:4,background:liberado?C.green:C.orange,flexShrink:0}}/>
+                    <span style={{fontSize:12,fontWeight:700,color:liberado?C.green:C.orange}}>
+                      {liberado?"Plano ativo — aluno está treinando":"Aguardando criação do plano"}
+                    </span>
+                    {liberado&&<button style={{...s.btn("danger"),padding:"5px 10px",fontSize:11,marginLeft:"auto"}}
+                      onClick={revogarPlano} disabled={saving}>Revogar</button>}
+                  </div>
+                  {!semanas&&<button style={{...s.btn("orange"),padding:"10px 16px",fontSize:12}} onClick={iniciarGeracaoIA}>🤖 Gerar com IA</button>}
+                  {semanas&&!liberado&&<button style={{...s.btn("orange"),padding:"10px 16px",fontSize:12}} onClick={iniciarGeracaoIA}>🔄 Regerar</button>}
+                </div>
+
+                {/* Progresso com comprovações */}
+                {liberado&&semanas&&(
+                  <ProgressoAluno uid={selectedUid} semanas={semanas} progresso={progressoAluno}/>
+                )}
+
+                {/* Tabs */}
+                <div style={{display:"flex",background:C.surface,border:`1px solid ${C.border}`,
+                  borderRadius:14,overflow:"hidden",marginBottom:20}}>
+                  {tabs.map(t=>(
+                    <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                      flex:1,padding:"11px 6px",border:"none",
+                      borderRight:t.id!=="preview"?`1px solid ${C.border}`:"none",
+                      background:tab===t.id?C.card:"transparent",
+                      color:tab===t.id?C.blue:C.muted,
+                      cursor:"pointer",fontFamily:"inherit",fontSize:11,fontWeight:700,
+                      letterSpacing:".5px",textTransform:"uppercase",transition:"all .2s"}}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+
+                {tab==="perfil"&&(
+                  <div className="fade-in">
+                    <PerfilCard aluno={dados.aluno} teste={dados.teste}/>
+                    {!semanas?(
+                      <button style={{...s.btn("orange"),width:"100%"}} onClick={iniciarGeracaoIA}>🤖 Gerar Plano com IA →</button>
+                    ):(
+                      <button style={{...s.btn("primary"),width:"100%"}} onClick={()=>setTab("editor")}>✏️ Ir para Editor →</button>
+                    )}
+                  </div>
+                )}
+
+                {tab==="editor"&&semanas&&(
+                  <div className="fade-in">
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20,flexWrap:"wrap",gap:10}}>
+                      <div>
+                        <div style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800}}>
+                          Editor de <span style={{color:C.blue}}>Treinos</span>
+                        </div>
+                        <div style={{fontSize:12,color:C.muted,marginTop:2}}>
+                          {dados.aluno.nome} · {dados.aluno.objetivo} · {dados.aluno.dias}x/sem
+                        </div>
+                      </div>
+                    </div>
+                    {semanas.map((sem,i)=>(
+                      <SemanaEditor key={i} semana={sem} zonaData={dados.teste.zonas}
+                        onChange={s=>setSemanas(semanas.map((x,xi)=>xi===i?s:x))}/>
+                    ))}
+                    <div style={{marginTop:16}}>
+                      <Field label="Análise do Professor (opcional)">
+                        <textarea value={analise} onChange={e=>setAnalise(e.target.value)}
+                          placeholder="Orientações gerais, progressão esperada, dicas específicas..."
+                          style={{...s.input,resize:"vertical",minHeight:100,fontSize:13}}/>
+                      </Field>
+                    </div>
+                    <div style={{display:"flex",gap:10,marginTop:20}}>
+                      <button style={{...s.btn("ghost"),flex:1}} onClick={()=>setTab("preview")}>👁 Preview →</button>
+                      <button style={{...s.btn("success"),flex:2}} onClick={liberarPlano} disabled={saving}>
+                        {saving?"⏳ Salvando...":"🚀 Liberar Plano para o Aluno"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {tab==="editor"&&!semanas&&(
+                  <div style={s.card({textAlign:"center",padding:40})}>
+                    <div style={{fontSize:36,marginBottom:12}}>🤖</div>
+                    <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,marginBottom:8}}>Nenhum plano ainda</div>
+                    <button style={s.btn("orange")} onClick={iniciarGeracaoIA}>🤖 Gerar com IA agora</button>
+                  </div>
+                )}
+
+                {tab==="preview"&&semanas&&(
+                  <div className="fade-in">
+                    {semanas.map((sem,wi)=>(
+                      <div key={wi} style={s.card({marginBottom:16})}>
+                        <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color:C.blue,marginBottom:4}}>
+                          Semana {sem.numero} — {sem.titulo||"(sem título)"}
+                        </div>
+                        {sem.foco&&<div style={{fontSize:12,color:C.muted,marginBottom:12}}>{sem.foco}</div>}
+                        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                          {sem.treinos.map((t,ti)=>{
+                            const zc={Z1:C.green,Z2:"#3498DB",Z3:C.yellow,Z4:C.red,Z5:C.purple,Misto:C.orange};
+                            return(
+                              <div key={ti} style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:12,padding:"12px 14px",opacity:t.tipo==="descanso"?.7:1}}>
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:6}}>
+                                  <div>
+                                    <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:3}}>
+                                      {t.tipo==="descanso"?"😴":t.tipo==="ativo"?"🚶":"🏃"} {t.dia}
+                                    </div>
+                                    <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:15}}>{t.titulo||t.tipo}</div>
+                                  </div>
+                                  <div style={{display:"flex",gap:5,flexWrap:"wrap",flexShrink:0}}>
+                                    {t.zona&&t.zona!=="Descanso"&&(
+                                      <span style={{padding:"4px 10px",borderRadius:20,fontSize:11,fontWeight:700,
+                                        background:`${zc[t.zona]||C.orange}22`,color:zc[t.zona]||C.orange,
+                                        border:`1px solid ${zc[t.zona]||C.orange}44`}}>{t.zona}</span>
+                                    )}
+                                    {t.duracao&&<span style={{padding:"4px 10px",borderRadius:20,fontSize:11,fontWeight:700,
+                                      background:"rgba(75,123,255,.12)",color:C.blue,border:"1px solid rgba(75,123,255,.25)"}}>{t.duracao}</span>}
+                                  </div>
+                                </div>
+                                {t.fc_alvo&&t.tipo!=="descanso"&&(
+                                  <div style={{fontSize:12,color:C.muted,marginTop:8}}>
+                                    🫀 FC: <strong style={{color:C.orange}}>{t.fc_alvo}</strong>
+                                    {t.pace_base&&<span style={{marginLeft:12}}>⏱ Pace: <strong style={{color:C.blue}}>{t.pace_base}</strong></span>}
+                                  </div>
+                                )}
+                                {t.tipo!=="descanso"&&(t.aquecimento||t.principal||t.desaquecimento)&&(
+                                  <div style={{marginTop:10,display:"flex",flexDirection:"column",gap:7}}>
+                                    {t.aquecimento&&<div style={{background:"rgba(75,123,255,.07)",border:"1px solid rgba(75,123,255,.2)",borderRadius:8,padding:"9px 12px",fontSize:12,color:C.light}}><strong style={{color:C.blue}}>🔵 Aquecimento: </strong>{t.aquecimento}</div>}
+                                    {t.principal&&<div style={{background:"rgba(255,107,53,.08)",border:"1px solid rgba(255,107,53,.2)",borderRadius:8,padding:"9px 12px",fontSize:12,color:C.light}}><strong style={{color:C.orange}}>🟠 Principal: </strong>{t.principal}</div>}
+                                    {t.desaquecimento&&<div style={{background:"rgba(46,204,113,.07)",border:"1px solid rgba(46,204,113,.2)",borderRadius:8,padding:"9px 12px",fontSize:12,color:C.light}}><strong style={{color:C.green}}>🟢 Desaquecimento: </strong>{t.desaquecimento}</div>}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                    <div style={{display:"flex",gap:10,marginTop:8}}>
+                      <button style={{...s.btn("ghost"),flex:1}} onClick={()=>setTab("editor")}>← Voltar ao Editor</button>
+                      <button style={{...s.btn("success"),flex:2}} onClick={liberarPlano} disabled={saving}>
+                        {saving?"⏳ Salvando...":"🚀 Liberar para o Aluno"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
