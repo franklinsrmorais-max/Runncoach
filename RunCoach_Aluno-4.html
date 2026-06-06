@@ -1,0 +1,1268 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>RunCoach — Plataforma do Aluno</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0A0A0F;font-family:'Manrope',sans-serif;color:#F0F0F8}
+    select option{background:#16161F}
+    ::-webkit-scrollbar{width:5px}
+    ::-webkit-scrollbar-track{background:#0A0A0F}
+    ::-webkit-scrollbar-thumb{background:#222230;border-radius:3px}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+    @keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
+    .fade-in{animation:fadeIn .4s ease forwards}
+    .slide-in{animation:slideIn .3s ease forwards}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const C = {
+  bg:"#0A0A0F", surface:"#11111A", card:"#181820", border:"#222232",
+  orange:"#FF6B35", orangeD:"#FF3D00", blue:"#4B7BFF", blueD:"#2855DB",
+  green:"#2ECC71", yellow:"#F1C40F", red:"#E74C3C", purple:"#9B59B6",
+  text:"#F0F0F8", muted:"#5A5A78", light:"#9090B8",
+};
+
+const ZONES = [
+  {bg:"rgba(46,204,113,.10)",border:"rgba(46,204,113,.25)",color:"#2ECC71",name:"Z1 · Recuperação",desc:"Muito leve · você canta"},
+  {bg:"rgba(52,152,219,.10)",border:"rgba(52,152,219,.25)",color:"#3498DB",name:"Z2 · Base",desc:"Leve · conversa fácil"},
+  {bg:"rgba(241,196,15,.10)",border:"rgba(241,196,15,.25)",color:"#F1C40F",name:"Z3 · Aeróbico",desc:"Moderado · frases curtas"},
+  {bg:"rgba(231,76,60,.10)",border:"rgba(231,76,60,.25)",color:"#E74C3C",name:"Z4 · Limiar",desc:"Difícil · poucas palavras"},
+  {bg:"rgba(155,89,182,.10)",border:"rgba(155,89,182,.25)",color:"#9B59B6",name:"Z5 · VO₂ Máx",desc:"Máximo · impossível falar"},
+];
+
+// Tipo de treino → cor, emoji e descrição
+const TIPO_INFO = {
+  rodagem:    {emoji:"🟢",color:"#2ECC71", label:"Rodagem",        desc:"Ritmo leve · base aeróbica"},
+  longo:      {emoji:"🔵",color:"#3498DB", label:"Longão",         desc:"Longo e leve · resistência"},
+  tiros:      {emoji:"🔴",color:"#E74C3C", label:"Tiros",          desc:"Alta intensidade · velocidade"},
+  fartlek:    {emoji:"🟠",color:"#FF6B35", label:"Fartlek",        desc:"Jogo de ritmos · livre"},
+  tempo_run:  {emoji:"🟡",color:"#F1C40F", label:"Tempo Run",      desc:"Ritmo limiar · sustentado"},
+  subida:     {emoji:"🟣",color:"#9B59B6", label:"Subida",         desc:"Força e potência"},
+  regenerativo:{emoji:"⚪",color:"#8888AA",label:"Regenerativo",   desc:"Muito leve · recuperação"},
+  progressivo:{emoji:"🔷",color:"#4B7BFF", label:"Progressivo",    desc:"Acelera gradual · controle"},
+  descanso:   {emoji:"😴",color:"#5A5A78", label:"Descanso",       desc:"Recuperação ativa ou total"},
+};
+
+// ─── FIREBASE SDK ─────────────────────────────────────────────
+let _db = null;
+function initFirebase(dbUrl) {
+  if (_db) return _db;
+  const app = firebase.initializeApp({ databaseURL: dbUrl }, "rc-"+Date.now());
+  _db = firebase.database(app);
+  return _db;
+}
+async function fbGet(dbUrl) {
+  const db = initFirebase(dbUrl);
+  const snap = await db.ref("runcoach").get();
+  return snap.val() || {alunos:{}, planos:{}, progresso:{}, config:{}};
+}
+async function fbPatch(dbUrl, patchFn) {
+  for(let attempt=0; attempt<3; attempt++){
+    try {
+      const db = initFirebase(dbUrl);
+      const snap = await db.ref("runcoach").get();
+      const latest = snap.val() || {alunos:{}, planos:{}, progresso:{}, config:{}};
+      const updated = patchFn(latest);
+      await db.ref("runcoach").set(updated);
+      return updated;
+    } catch(e){
+      if(attempt===2) throw e;
+      await new Promise(r=>setTimeout(r,600*(attempt+1)));
+    }
+  }
+}
+
+// ─── SHARED UI ────────────────────────────────────────────────
+const s = {
+  card:(x={})=>({background:C.card,border:`1px solid ${C.border}`,borderRadius:14,padding:20,...x}),
+  input:{background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,padding:"12px 14px",
+    color:C.text,fontSize:14,outline:"none",width:"100%",fontFamily:"inherit",transition:"border-color .2s"},
+  label:{fontSize:11,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",
+    color:C.muted,marginBottom:5,display:"block"},
+  btn:(v="primary")=>({
+    display:"inline-flex",alignItems:"center",justifyContent:"center",gap:8,
+    padding:"13px 22px",borderRadius:10,border:"none",cursor:"pointer",
+    fontFamily:"inherit",fontSize:14,fontWeight:700,transition:"all .2s",
+    ...(v==="primary"?{background:`linear-gradient(135deg,${C.orange},${C.orangeD})`,color:"#fff",boxShadow:"0 6px 20px rgba(255,107,53,.3)"}:
+    v==="blue"?{background:`linear-gradient(135deg,${C.blue},${C.blueD})`,color:"#fff",boxShadow:"0 6px 20px rgba(75,123,255,.3)"}:
+    v==="success"?{background:"linear-gradient(135deg,#2ECC71,#27AE60)",color:"#fff",boxShadow:"0 6px 20px rgba(46,204,113,.3)"}:
+    v==="danger"?{background:"rgba(231,76,60,.12)",color:C.red,border:`1px solid rgba(231,76,60,.3)`}:
+    {background:C.card,color:C.light,border:`1px solid ${C.border}`}),
+  }),
+};
+
+function Field({label,required,hint,error,children}){
+  return(
+    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+      <label style={s.label}>{label}{required&&<span style={{color:C.orange}}> *</span>}</label>
+      {children}
+      {hint&&<span style={{fontSize:11,color:C.muted}}>{hint}</span>}
+      {error&&<span style={{fontSize:11,color:C.red}}>{error}</span>}
+    </div>
+  );
+}
+function Inp({type="text",placeholder,min,max,value,onChange,disabled,style={}}){
+  const [f,setF]=useState(false);
+  return(
+    <input type={type} placeholder={placeholder} min={min} max={max} value={value} onChange={onChange}
+      disabled={disabled} onFocus={()=>setF(true)} onBlur={()=>setF(false)}
+      style={{...s.input,borderColor:f?C.orange:C.border,boxShadow:f?"0 0 0 3px rgba(255,107,53,.1)":"none",opacity:disabled?.6:1,...style}}/>
+  );
+}
+function Sel({value,onChange,options,placeholder}){
+  const [f,setF]=useState(false);
+  return(
+    <select value={value} onChange={onChange} onFocus={()=>setF(true)} onBlur={()=>setF(false)}
+      style={{...s.input,borderColor:f?C.orange:C.border,boxShadow:f?"0 0 0 3px rgba(255,107,53,.1)":"none",appearance:"none",cursor:"pointer"}}>
+      <option value="">{placeholder||"Selecione..."}</option>
+      {options.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+    </select>
+  );
+}
+function Chip({label,selected,onClick}){
+  return(
+    <div onClick={onClick} style={{padding:"7px 14px",borderRadius:20,cursor:"pointer",fontSize:12,fontWeight:600,
+      border:`1px solid ${selected?C.orange:C.border}`,background:selected?"rgba(255,107,53,.15)":C.card,
+      color:selected?C.orange:C.light,transition:"all .15s"}}>{label}</div>
+  );
+}
+function Notify({msg,type}){
+  if(!msg)return null;
+  return(
+    <div style={{position:"fixed",top:20,right:20,zIndex:9999,padding:"12px 20px",borderRadius:10,fontSize:13,fontWeight:600,
+      background:type==="success"?"rgba(46,204,113,.95)":type==="error"?"rgba(231,76,60,.95)":"rgba(75,123,255,.95)",
+      color:"#fff",boxShadow:"0 8px 24px rgba(0,0,0,.5)",animation:"fadeIn .3s ease",maxWidth:340}}>{msg}</div>
+  );
+}
+
+// ─── CHATBOT DE CORRIDA ───────────────────────────────────────
+const RESPOSTAS = {
+  // Saudações
+  oi:["Olá! 👋 Sou o assistente RunCoach. Posso te ajudar com dúvidas sobre corrida, treinos, zonas de FC, nutrição e muito mais. O que você quer saber?"],
+  olá:["Olá corredor! 🏃 Pode perguntar qualquer coisa sobre corrida — do iniciante ao avançado!"],
+  // Tipos de treino
+  rodagem:["🟢 **Rodagem (Easy Run)**\n\nO feijão com arroz da corrida! Feita em ritmo leve onde você conversa normalmente.\n\n• Zona: Z1–Z2 (60–70% FC Máx)\n• Ocupa 60–70% do volume semanal\n• Objetivo: base aeróbica, fortalecer tendões, queimar gordura\n• Ritmo: ~1–2 min/km mais lento que sua prova\n\n💡 Se você não consegue falar frases inteiras, está rápido demais!"],
+  longão:["🔵 **Treino Longo (Long Run)**\n\nVariação da rodagem com distância maior. Ritmo leve e controlado.\n\n• Zona: Z1–Z2\n• Geralmente 25–35% do volume semanal\n• Objetivo: resistência, eficiência de gordura, confiança mental\n• Aumente no máximo 10% por semana\n\n💡 Nunca sacrifique o ritmo pelo ego — lento e consistente ganha a maratona!"],
+  tiros:["🔴 **Tiros (Interval Training)**\n\nAlta intensidade intercalada com recuperação.\n\n• Zona: Z4–Z5\n• Curtos: 200–400m | Longos: 800–2000m\n• Recuperação: trote leve ou parado\n• Objetivo: VO₂ máx, velocidade, eficiência\n\n⚠️ Nunca faça tiros sem aquecimento adequado de pelo menos 2km de trote!"],
+  fartlek:["🟠 **Fartlek** (\"jogo de velocidade\" em sueco)\n\nIntervalado livre, sem rigidez de distâncias.\n\n• Acelere até a próxima árvore, trote até a esquina, sprinte a subida\n• Zona: varia Z2 a Z5\n• Objetivo: percepção de esforço, diversão, variação mental\n\n💡 Perfeito para corredores que acham o treino monótono — deixe a criatividade fluir!"],
+  "tempo run":["🟡 **Tempo Run (Limiar Lactato)**\n\nRitmo 'confortavelmente difícil' — o máximo que sustenta ~40 min.\n\n• Zona: Z3–Z4 (85–90% FC Máx)\n• Duração: 20–40 min contínuos\n• Objetivo: elevar o limiar anaeróbico\n• Ritmo: ~10–20 seg/km mais rápido que o pace de prova\n\n💡 Se 5 min após terminar você já se recuperou, provavelmente foi fácil demais!"],
+  subida:["🟣 **Treino de Subida (Hill Reps)**\n\nSuba forte, desça trotando.\n\n• Inclinação: 4–8%\n• Duração dos tiros: 20 seg a 2 min\n• Recuperação: descida caminhando/trotando\n• Objetivo: força muscular, potência, postura\n\n💡 Subida é musculação natural — eleva joelhos, apoia no antepé e mantenha o tronco ligeiramente inclinado!"],
+  regenerativo:["⚪ **Treino Regenerativo**\n\nCorrida muito leve no dia após treino pesado.\n\n• Zona: Z1 apenas\n• Duração: 20–30 min no máximo\n• Ritmo: você deve conseguir cantar\n• Objetivo: circulação, remoção de metabólitos, recuperação ativa\n\n⚠️ Se sentir dor ou cansaço excessivo, substitua por caminhada ou descanso total!"],
+  progressivo:["🔷 **Treino Progressivo**\n\nComeça leve e acelera gradualmente a cada km.\n\n• Exemplo: 2km Z2 → 2km Z3 → 2km Z4\n• Objetivo: controle de ritmo, pacing de prova\n• Ensina o corpo a acelerar quando está cansado\n\n💡 Comece SEMPRE mais lento do que acha necessário. A maioria erra começando rápido!"],
+  // Zonas de FC
+  zona:["💓 **Zonas de Frequência Cardíaca (Karvonen)**\n\n• Z1 (50–60%): Recuperação — conversa normal\n• Z2 (60–70%): Base aeróbica — frases fáceis\n• Z3 (70–80%): Aeróbico — frases curtas\n• Z4 (80–90%): Limiar — poucas palavras\n• Z5 (90–100%): VO₂ Máx — impossível falar\n\n🎯 80% dos seus treinos devem ser Z1–Z2!"],
+  "fc máxima":["❤️ **FC Máxima**\n\nA forma mais precisa é o Teste de 3km — você corre 3km no máximo esforço e mede a FC ao final.\n\nFórmula alternativa (menos precisa): 220 - idade\n\n💡 Sua FC Máx real pode variar até 20 bpm da fórmula — por isso o teste é tão importante!"],
+  // Pace e ritmo
+  pace:["⏱️ **Pace (Ritmo)**\n\nMinutos por quilômetro. Exemplos:\n\n• 7:00 min/km → ritmo de corredor iniciante\n• 5:30 min/km → intermediário\n• 4:00 min/km → avançado\n• 3:00 min/km → elite\n\n📌 Seu pace de treino deve ser calculado pelas suas zonas de FC, não pelo que o vizinho corre!"],
+  // VO2max
+  "vo2":["🫁 **VO₂ Máximo**\n\nQuantidade máxima de oxigênio que seu corpo usa durante exercício máximo.\n\n• Baixo: < 35 ml/kg/min\n• Médio: 35–50 ml/kg/min\n• Alto: > 50 ml/kg/min\n• Elite: > 70 ml/kg/min\n\n📈 Treinos de tiros e subidas são os mais eficientes para aumentar o VO₂ Máx!"],
+  // Nutrição
+  nutrição:["🍌 **Nutrição para Corrida**\n\n**Antes:** Refeição leve 2–3h antes. Banana ou tâmara 30 min antes.\n**Durante:** Géis ou carboidratos a cada 45 min para treinos > 1h.\n**Após:** Proteína + carboidrato nas primeiras 2h (janela anabólica).\n\n💧 Hidratação: 500ml 2h antes, gole a cada 15–20 min durante.\n\n⚠️ Nunca teste alimento/gel novo em dia de prova!"],
+  hidratação:["💧 **Hidratação**\n\n• Pré-treino: 400–600ml 2h antes\n• Durante: 150–200ml a cada 15–20 min\n• Após: 500ml por 500g de peso perdido\n\n🌡️ No calor, aumente 20–30% a ingestão. Urina amarelo-clara = bem hidratado. Escura = beba mais!"],
+  // Lesões
+  lesão:["🩹 **Prevenção de Lesões**\n\nAs 3 principais causas de lesão:\n1. Aumento brusco de volume (regra dos 10%)\n2. Calçado inadequado\n3. Falta de aquecimento e descanso\n\n🛡️ Dicas:\n• Aquecimento de 10–15 min antes\n• Nunca aumente mais de 10% o volume por semana\n• 1–2 dias de descanso por semana\n• Fortaleça quadril e core!\n\n⚠️ Dor ≠ desconforto. Dor para. Desconforto continua com atenção."],
+  // Aquecimento
+  aquecimento:["🔥 **Aquecimento — Antes de Correr**\n\n✅ **Distância recomendada: 800m a 1,5km de trote leve + exercícios dinâmicos**\n\nRotina ideal:\n• 800m–1km de caminhada/trote muito leve (Z1)\n• Canelinha (elevação de joelho)\n• Chutinho atrás (calcanhares)\n• Avanço lateral\n• Rotação de quadril\n• 200m de skipping leve\n\n❌ Evite alongamento estático antes — ele reduz potência muscular!"],
+  // Descanso
+  descanso:["😴 **A Importância do Descanso**\n\nVocê NÃO fica mais forte treinando — fica mais forte DESCANSANDO.\n\nO treino é o estímulo. A recuperação é onde a adaptação acontece.\n\n• 1–2 dias off por semana\n• Sono: 7–9h\n• Semana de descarga: reduza 30–40% do volume a cada 3–4 semanas\n\n💡 Mais não é sempre melhor. Melhor é melhor!"],
+  // Calçados
+  calçado:["👟 **Escolhendo o Calçado**\n\n• Vá a uma loja especializada e faça análise de pisada\n• Troque a cada 600–800km\n• Não use o mesmo tênis todos os dias\n• Rotação de 2 tênis aumenta durabilidade e reduz lesões\n\n🔍 Pisada:\n• **Neutra**: maioria dos tênis\n• **Supinada**: almofadamento lateral\n• **Pronada**: tênis com suporte medial"],
+  // Iniciante
+  iniciante:["🌱 **Guia para Iniciantes**\n\nSemanas 1–4: Método corrida-caminhada\n• Ex: 1 min correndo / 2 min caminhando × 8 repetições\n\nSemanas 5–8: Aumente corrida gradualmente\n• Meta: correr 30 min contínuos\n\nRegras de ouro:\n✅ Nunca aumente mais de 10% por semana\n✅ 3 treinos/semana é suficiente no início\n✅ Se você não consegue falar, está rápido\n✅ Dor ≠ desconforto — aprenda a diferença\n✅ Paciência — resultados reais em 8–12 semanas"],
+  // Teste 3km
+  "teste 3km":["📏 **Teste de 3km**\n\nProtocolo:\n1. Aqueça 1–1,5km de trote leve + dinâmicos\n2. Corra 3km no máximo esforço sustentável\n3. Meça a FC imediatamente ao cruzar os 3km\n4. Essa é sua FC Máxima Real\n5. Anote o tempo para calcular seu pace\n\n⏰ Repita o teste a cada 4–8 semanas para ver a evolução!\n\n📈 Melhora de 30–60 seg em 3km = grande evolução aeróbica"],
+  // Maratona
+  maratona:["🏆 **Maratona (42,195km)**\n\nTempo mínimo recomendado de preparação: 16–20 semanas\n\nBase necessária: correr 5km sem dificuldade + 3–4 treinos/semana regulares por pelo menos 6 meses.\n\nEstrutura típica semanal:\n• 2–3 rodagens\n• 1 longão (aumenta progressivamente até 32–35km)\n• 1 treino de qualidade (tiros ou tempo run)\n\n💡 A maratona começa no km 30 — treine sua cabeça tanto quanto suas pernas!"],
+  // Semana
+  semana:["📅 **Estrutura Semanal Ideal**\n\nExemplo para intermediário (4 dias):\n• Seg: Rodagem leve (Z2)\n• Ter: Tiros ou Tempo Run (Z4)\n• Qui: Rodagem moderada (Z2–Z3)\n• Sáb: Longão (Z2)\n\nPrincípio: nunca faça 2 treinos intensos seguidos. Hard/Easy/Hard!\n\n🎯 80% do volume em Z1–Z2, 20% em Z3–Z5"],
+};
+
+function normalizar(txt){
+  return txt.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+    .replace(/[?!.,]/g,"");
+}
+
+function buscarResposta(pergunta){
+  const p = normalizar(pergunta);
+  for(const [chave, respostas] of Object.entries(RESPOSTAS)){
+    if(p.includes(normalizar(chave))) return respostas[0];
+  }
+  // Fallbacks por palavra-chave
+  if(p.includes("treino")) return RESPOSTAS["semana"][0];
+  if(p.includes("comer")||p.includes("aliment")) return RESPOSTAS["nutrição"][0];
+  if(p.includes("dor")||p.includes("machucar")) return RESPOSTAS["lesão"][0];
+  if(p.includes("agua")||p.includes("beber")) return RESPOSTAS["hidratação"][0];
+  if(p.includes("tenis")||p.includes("sapato")) return RESPOSTAS["calçado"][0];
+  if(p.includes("rapido")||p.includes("velocidade")) return RESPOSTAS["tiros"][0];
+  if(p.includes("lento")||p.includes("facil")) return RESPOSTAS["rodagem"][0];
+  if(p.includes("5km")||p.includes("10km")||p.includes("começ")) return RESPOSTAS["iniciante"][0];
+  if(p.includes("42")||p.includes("21")||p.includes("prova")||p.includes("corrida")) return RESPOSTAS["maratona"][0];
+  return "🤔 Não encontrei uma resposta específica para isso. Tente perguntar sobre: **rodagem, longão, tiros, fartlek, tempo run, subida, zonas de FC, pace, VO2, nutrição, hidratação, aquecimento, lesão, calçado, iniciante, maratona** ou **estrutura semanal**!";
+}
+
+function ChatBot({whatsapp}){
+  const [open,setOpen]=useState(false);
+  const [msgs,setMsgs]=useState([{from:"bot",text:"Olá! 👋 Sou o **assistente RunCoach**. Pode me perguntar qualquer coisa sobre corrida — do iniciante ao avançado!\n\nTente: *\"o que é rodagem?\"*, *\"como aquecer?\"*, *\"o que comer antes?\"*"}]);
+  const [input,setInput]=useState("");
+  const endRef=useRef(null);
+
+  useEffect(()=>{if(open)endRef.current?.scrollIntoView({behavior:"smooth"});},[msgs,open]);
+
+  const enviar=()=>{
+    const txt=input.trim();
+    if(!txt)return;
+    const resp=buscarResposta(txt);
+    setMsgs(m=>[...m,{from:"user",text:txt},{from:"bot",text:resp}]);
+    setInput("");
+  };
+
+  const sugestoes=["O que é rodagem?","Como aquecer?","O que são zonas de FC?","Como melhorar velocidade?","O que comer antes?"];
+
+  const renderText=(txt)=>txt.split("\n").map((line,i)=>{
+    const parts=line.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+    return <div key={i} style={{marginBottom:2}}>{parts.map((p,j)=>
+      p.startsWith("**")?<strong key={j}>{p.slice(2,-2)}</strong>:
+      p.startsWith("*")?<em key={j} style={{color:C.orange}}>{p.slice(1,-1)}</em>:p
+    )}</div>;
+  });
+
+  return(
+    <>
+      {/* Botão flutuante */}
+      <div onClick={()=>setOpen(o=>!o)} style={{position:"fixed",bottom:24,right:24,zIndex:1000,
+        width:56,height:56,borderRadius:"50%",background:`linear-gradient(135deg,${C.blue},${C.blueD})`,
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,cursor:"pointer",
+        boxShadow:"0 8px 24px rgba(75,123,255,.5)",transition:"transform .2s",transform:open?"scale(0.9)":"scale(1)"}}>
+        {open?"✕":"🤖"}
+      </div>
+
+      {/* Janela do chat */}
+      {open&&(
+        <div style={{position:"fixed",bottom:90,right:24,zIndex:999,width:340,maxWidth:"calc(100vw - 48px)",
+          background:C.card,border:`1px solid ${C.border}`,borderRadius:16,
+          boxShadow:"0 20px 60px rgba(0,0,0,.8)",display:"flex",flexDirection:"column",
+          maxHeight:"70vh",animation:"fadeIn .2s ease"}}>
+          {/* Header */}
+          <div style={{padding:"14px 16px",borderBottom:`1px solid ${C.border}`,
+            background:`linear-gradient(135deg,rgba(75,123,255,.15),rgba(75,123,255,.05))`,borderRadius:"16px 16px 0 0"}}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontWeight:800,fontSize:14}}>🤖 Assistente RunCoach</div>
+            <div style={{fontSize:11,color:C.muted,marginTop:2}}>Do iniciante ao avançado · sempre online</div>
+          </div>
+
+          {/* Mensagens */}
+          <div style={{flex:1,overflowY:"auto",padding:14,display:"flex",flexDirection:"column",gap:10}}>
+            {msgs.map((m,i)=>(
+              <div key={i} style={{display:"flex",justifyContent:m.from==="user"?"flex-end":"flex-start"}}>
+                <div style={{maxWidth:"85%",padding:"10px 13px",borderRadius:m.from==="user"?"12px 12px 2px 12px":"12px 12px 12px 2px",
+                  background:m.from==="user"?`linear-gradient(135deg,${C.orange},${C.orangeD})`:"rgba(75,123,255,.12)",
+                  border:m.from==="bot"?"1px solid rgba(75,123,255,.2)":"none",
+                  fontSize:12.5,lineHeight:1.6,color:C.text}}>
+                  {renderText(m.text)}
+                </div>
+              </div>
+            ))}
+            <div ref={endRef}/>
+          </div>
+
+          {/* Sugestões */}
+          <div style={{padding:"8px 14px",display:"flex",gap:6,flexWrap:"wrap",borderTop:`1px solid ${C.border}`}}>
+            {sugestoes.slice(0,3).map((s2,i)=>(
+              <div key={i} onClick={()=>{setInput(s2);}}
+                style={{fontSize:10,padding:"4px 10px",borderRadius:20,background:"rgba(75,123,255,.1)",
+                  border:"1px solid rgba(75,123,255,.2)",color:C.blue,cursor:"pointer",fontWeight:600}}>
+                {s2}
+              </div>
+            ))}
+          </div>
+
+          {/* Input */}
+          <div style={{padding:"10px 14px",borderTop:`1px solid ${C.border}`,display:"flex",gap:8}}>
+            <input value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>e.key==="Enter"&&enviar()}
+              placeholder="Pergunte sobre corrida..."
+              style={{...s.input,fontSize:12,padding:"9px 12px",flex:1,background:C.surface}}/>
+            <button onClick={enviar} style={{...s.btn("blue"),padding:"9px 14px",fontSize:13}}>➤</button>
+          </div>
+
+          {/* WhatsApp */}
+          {whatsapp&&(
+            <div style={{padding:"0 14px 14px"}}>
+              <a href={`https://wa.me/${whatsapp.replace(/\D/g,"")}`} target="_blank" rel="noopener noreferrer"
+                style={{...s.btn("success"),display:"flex",width:"100%",textDecoration:"none",padding:"10px",fontSize:12}}>
+                💬 Falar com o Professor
+              </a>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── CONEXÃO ─────────────────────────────────────────────────
+function ConexaoScreen({onConnect}){
+  const [dbUrl,setDbUrl]=useState("");
+  const [nome,setNome]=useState("");
+  const [email,setEmail]=useState("");
+  const [senha,setSenha]=useState("");
+  const [err,setErr]=useState("");
+  const [loading,setLoading]=useState(false);
+  const [step,setStep]=useState("espaco"); // espaco | login | cadastro
+  const [connectedUrl,setConnectedUrl]=useState("");
+
+  const conectarEspaco=async()=>{
+    const url=dbUrl.trim().replace(/\/+$/,"");
+    if(!url){setErr("Cole a URL do Firebase fornecida pelo professor.");return;}
+    if(!url.includes("firebaseio.com")){setErr("URL inválida. Deve conter firebaseio.com");return;}
+    setLoading(true);setErr("");
+    try{
+      const data=await fbGet(url);
+      if(!data||typeof data!=="object")throw new Error("inválido");
+      setConnectedUrl(url);
+      setStep("login");
+    }catch(e){setErr("Não foi possível conectar. Verifique a URL com seu professor.");}
+    setLoading(false);
+  };
+
+  const fazerLogin=async()=>{
+    if(!email.trim()||!senha){setErr("Preencha e-mail e senha.");return;}
+    setLoading(true);setErr("");
+    try{
+      const data=await fbGet(connectedUrl);
+      const alunos=data.alunos||{};
+      // Busca conta pelo e-mail
+      const entry=Object.values(alunos).find(a=>a.email&&a.email.toLowerCase()===email.trim().toLowerCase());
+      if(!entry){setErr("E-mail não encontrado. Verifique ou crie uma nova conta.");setLoading(false);return;}
+      if(entry.senha!==senha){setErr("Senha incorreta.");setLoading(false);return;}
+      const cfg={dbUrl:connectedUrl,uid:entry.uid,nome:entry.nome||entry.aluno?.nome,email:entry.email,senha};
+      try{localStorage.setItem("runcoach_aluno_session",JSON.stringify(cfg));}catch{}
+      onConnect(cfg);
+    }catch(e){setErr("Erro ao fazer login. Tente novamente.");}
+    setLoading(false);
+  };
+
+  const criarConta=async()=>{
+    if(!nome.trim()||!email.trim()||senha.length<6){setErr("Preencha nome, e-mail e senha (mín. 6 caracteres).");return;}
+    if(!email.includes("@")){setErr("E-mail inválido.");return;}
+    setLoading(true);setErr("");
+    try{
+      // Verifica se e-mail já existe
+      const data=await fbGet(connectedUrl);
+      const alunos=data.alunos||{};
+      const existe=Object.values(alunos).find(a=>a.email&&a.email.toLowerCase()===email.trim().toLowerCase());
+      if(existe){setErr("Este e-mail já está cadastrado. Faça login.");setLoading(false);return;}
+      const uid=email.toLowerCase().replace(/[^a-z0-9]/g,"_")+"_"+Date.now().toString(36);
+      const cfg={dbUrl:connectedUrl,uid,nome:nome.trim(),email:email.trim(),senha};
+      try{localStorage.setItem("runcoach_aluno_session",JSON.stringify(cfg));}catch{}
+      onConnect(cfg);
+    }catch(e){setErr("Erro ao criar conta.");}
+    setLoading(false);
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:C.bg,display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{width:"100%",maxWidth:440}}>
+        <div style={{textAlign:"center",marginBottom:32}}>
+          <div style={{width:64,height:64,borderRadius:16,background:`linear-gradient(135deg,${C.orange},${C.orangeD})`,
+            display:"inline-flex",alignItems:"center",justifyContent:"center",fontSize:32,
+            boxShadow:"0 10px 28px rgba(255,107,53,.4)",marginBottom:14}}>🏃</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:28,fontWeight:800,letterSpacing:1}}>
+            Run<span style={{color:C.orange}}>Coach</span>
+          </div>
+          <div style={{fontSize:11,color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginTop:3}}>Plataforma do Aluno</div>
+        </div>
+        <div style={s.card({padding:26})}>
+
+          {/* PASSO 1 — URL do Firebase */}
+          {step==="espaco"&&(
+            <>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:17,fontWeight:800,marginBottom:6}}>Conectar ao seu professor</div>
+              <div style={{fontSize:13,color:C.light,lineHeight:1.6,marginBottom:18}}>
+                Peça ao professor a <strong style={{color:C.orange}}>URL do Firebase</strong> e cole abaixo.
+              </div>
+              <div style={{marginBottom:14}}>
+                <Field label="URL do Firebase" hint="Ex: https://meu-projeto-abc-default-rtdb.firebaseio.com">
+                  <Inp placeholder="https://meu-projeto-default-rtdb.firebaseio.com" value={dbUrl}
+                    onChange={e=>setDbUrl(e.target.value)} style={{fontFamily:"monospace",fontSize:11}}/>
+                </Field>
+              </div>
+              {err&&<div style={{fontSize:12,color:C.red,background:"rgba(231,76,60,.1)",border:"1px solid rgba(231,76,60,.25)",borderRadius:8,padding:"10px 12px",marginBottom:12}}>{err}</div>}
+              <button style={{...s.btn("primary"),width:"100%"}} onClick={conectarEspaco} disabled={loading}>
+                {loading?"Verificando...":"Conectar →"}
+              </button>
+            </>
+          )}
+
+          {/* PASSO 2 — Login ou Cadastro */}
+          {(step==="login"||step==="cadastro")&&(
+            <>
+              {/* Tabs */}
+              <div style={{display:"flex",background:C.surface,border:`1px solid ${C.border}`,borderRadius:10,overflow:"hidden",marginBottom:20}}>
+                {["login","cadastro"].map(t=>(
+                  <button key={t} onClick={()=>{setStep(t);setErr("");}}
+                    style={{flex:1,padding:"10px",border:"none",cursor:"pointer",fontFamily:"inherit",
+                      fontSize:12,fontWeight:700,background:step===t?C.card:"transparent",
+                      color:step===t?C.orange:C.muted,transition:"all .2s"}}>
+                    {t==="login"?"🔑 Entrar":"✨ Criar conta"}
+                  </button>
+                ))}
+              </div>
+
+              {step==="login"&&(
+                <>
+                  <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:14}}>
+                    <Field label="E-mail">
+                      <Inp type="email" placeholder="joao@email.com" value={email} onChange={e=>setEmail(e.target.value)}/>
+                    </Field>
+                    <Field label="Senha">
+                      <Inp type="password" placeholder="••••••••" value={senha} onChange={e=>setSenha(e.target.value)}/>
+                    </Field>
+                  </div>
+                  {err&&<div style={{fontSize:12,color:C.red,background:"rgba(231,76,60,.1)",border:"1px solid rgba(231,76,60,.25)",borderRadius:8,padding:"10px 12px",marginBottom:12}}>{err}</div>}
+                  <button style={{...s.btn("primary"),width:"100%"}} onClick={fazerLogin} disabled={loading}>
+                    {loading?"Entrando...":"🏃 Entrar →"}
+                  </button>
+                </>
+              )}
+
+              {step==="cadastro"&&(
+                <>
+                  <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:14}}>
+                    <Field label="Seu Nome">
+                      <Inp placeholder="João Silva" value={nome} onChange={e=>setNome(e.target.value)}/>
+                    </Field>
+                    <Field label="E-mail">
+                      <Inp type="email" placeholder="joao@email.com" value={email} onChange={e=>setEmail(e.target.value)}/>
+                    </Field>
+                    <Field label="Senha" hint="Mínimo 6 caracteres">
+                      <Inp type="password" placeholder="••••••••" value={senha} onChange={e=>setSenha(e.target.value)}/>
+                    </Field>
+                  </div>
+                  {err&&<div style={{fontSize:12,color:C.red,background:"rgba(231,76,60,.1)",border:"1px solid rgba(231,76,60,.25)",borderRadius:8,padding:"10px 12px",marginBottom:12}}>{err}</div>}
+                  <button style={{...s.btn("primary"),width:"100%"}} onClick={criarConta} disabled={loading}>
+                    {loading?"Criando conta...":"✨ Criar conta →"}
+                  </button>
+                </>
+              )}
+
+              <button style={{...s.btn("ghost"),width:"100%",marginTop:10,fontSize:11}}
+                onClick={()=>{setStep("espaco");setErr("");}}>← Voltar</button>
+            </>
+          )}
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── HEADER ──────────────────────────────────────────────────
+function Header({userName,mesAtual,onLogout}){
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:32}}>
+      <div style={{width:44,height:44,borderRadius:12,background:`linear-gradient(135deg,${C.orange},${C.orangeD})`,
+        display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,boxShadow:"0 8px 24px rgba(255,107,53,.35)"}}>🏃</div>
+      <div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,letterSpacing:1}}>
+          Run<span style={{color:C.orange}}>Coach</span>
+        </div>
+        <div style={{fontSize:10,color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginTop:1}}>
+          {userName?`Olá, ${userName.split(" ")[0]}`:"Plataforma do Aluno"}
+          {mesAtual>1?` · Mês ${mesAtual}`:""}
+        </div>
+      </div>
+      <div style={{marginLeft:"auto",display:"flex",gap:8,alignItems:"center"}}>
+        {mesAtual>1&&<div style={{padding:"5px 12px",borderRadius:20,background:"rgba(255,107,53,.12)",
+          border:"1px solid rgba(255,107,53,.3)",fontSize:11,fontWeight:700,color:C.orange}}>MÊS {mesAtual}</div>}
+        <div style={{padding:"5px 12px",borderRadius:20,background:"rgba(75,123,255,.12)",
+          border:"1px solid rgba(75,123,255,.25)",fontSize:11,fontWeight:700,color:C.blue}}>👤 ALUNO</div>
+        {onLogout&&<button onClick={onLogout} style={{...s.btn("ghost"),padding:"6px 12px",fontSize:11}}>Sair</button>}
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP NAV ────────────────────────────────────────────────
+function StepNav({step,setStep,completed,mesAtual}){
+  const steps=mesAtual>1
+    ?["Perfil","Reavaliação","Zonas FC","Meus Treinos"]
+    :["Perfil","Teste 3km","Zonas FC","Meus Treinos"];
+  return(
+    <div style={{display:"flex",background:C.surface,border:`1px solid ${C.border}`,borderRadius:14,overflow:"hidden",marginBottom:32}}>
+      {steps.map((name,i)=>(
+        <button key={i} onClick={()=>{if(i<=completed)setStep(i);}}
+          style={{flex:1,padding:"12px 6px",border:"none",borderRight:i<3?`1px solid ${C.border}`:"none",
+            background:step===i?C.card:"transparent",color:step===i?C.orange:i<completed?C.green:C.muted,
+            cursor:i<=completed?"pointer":"default",fontFamily:"inherit",fontSize:10,fontWeight:700,
+            letterSpacing:".5px",textTransform:"uppercase",lineHeight:1.3}}>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,display:"block",marginBottom:3}}>
+            {i<completed?"✓":`0${i+1}`}
+          </div>
+          {name}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ─── STEP 1: PERFIL ──────────────────────────────────────────
+function StepPerfil({initialData,onNext,mesAtual}){
+  const def=initialData||{};
+  const [form,setForm]=useState({
+    nome:def.nome||"",email:def.email||"",idade:def.idade||"",sexo:def.sexo||"",
+    peso:def.peso||"",altura:def.altura||"",nivel:def.nivel||"",
+    dias:def.dias||"",objetivo:def.objetivo||"",tempo:def.tempo||"",obs:def.obs||""
+  });
+  const [saude,setSaude]=useState(def.saude||[]);
+  const [local,setLocal]=useState(def.local||[]);
+  const [errors,setErrors]=useState({});
+  const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const toggle=(arr,setArr,val)=>setArr(a=>a.includes(val)?a.filter(x=>x!==val):[...a,val]);
+  const validate=()=>{
+    const e={};
+    if(!form.nome.trim())e.nome="Obrigatório";
+    if(!form.idade)e.idade="Obrigatório";
+    if(!form.peso)e.peso="Obrigatório";
+    if(!form.altura)e.altura="Obrigatório";
+    if(!form.nivel)e.nivel="Obrigatório";
+    if(!form.dias)e.dias="Obrigatório";
+    if(!form.objetivo)e.objetivo="Obrigatório";
+    setErrors(e);return Object.keys(e).length===0;
+  };
+  const submit=()=>{
+    if(!validate())return;
+    const imc=(parseFloat(form.peso)/Math.pow(parseFloat(form.altura)/100,2)).toFixed(1);
+    onNext({...form,imc,saude,local,fcMaxFormula:220-parseInt(form.idade)});
+  };
+  const saudeOpts=["Nenhuma","Hipertensão","Diabetes","Cardiopatia","Joelho","Lombar","Asma","Sobrepeso"];
+  const localOpts=["Rua / calçada","Parque","Esteira","Pista de atletismo","Trilha"];
+  return(
+    <div className="fade-in">
+      <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:"clamp(24px,6vw,36px)",fontWeight:800,lineHeight:1.1,marginBottom:8}}>
+        {mesAtual>1?"Atualização de":"Informações"} <span style={{color:C.orange}}>{mesAtual>1?"Dados":"Pessoais"}</span>
+      </h2>
+      <p style={{color:C.light,fontSize:14,marginBottom:24,lineHeight:1.6}}>
+        {mesAtual>1?"Atualize seus dados para o Mês "+mesAtual+". Eles serão enviados ao professor.":"Preencha seus dados. Eles serão enviados ao seu professor."}
+      </p>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:12}}>Dados Pessoais</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+        <Field label="Nome completo" required error={errors.nome}><Inp placeholder="Maria Silva" value={form.nome} onChange={e=>set("nome",e.target.value)}/></Field>
+        <Field label="E-mail"><Inp type="email" placeholder="maria@email.com" value={form.email} onChange={e=>set("email",e.target.value)}/></Field>
+        <Field label="Idade" required error={errors.idade}><Inp type="number" placeholder="30" min="10" max="99" value={form.idade} onChange={e=>set("idade",e.target.value)}/></Field>
+        <Field label="Sexo"><Sel value={form.sexo} onChange={e=>set("sexo",e.target.value)} options={[{v:"M",l:"Masculino"},{v:"F",l:"Feminino"}]}/></Field>
+        <Field label="Peso (kg)" required error={errors.peso}><Inp type="number" placeholder="70" min="30" max="300" value={form.peso} onChange={e=>set("peso",e.target.value)}/></Field>
+        <Field label="Altura (cm)" required error={errors.altura}><Inp type="number" placeholder="170" min="100" max="250" value={form.altura} onChange={e=>set("altura",e.target.value)}/></Field>
+      </div>
+      <div style={{borderTop:`1px solid ${C.border}`,margin:"18px 0"}}/>
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:12}}>Histórico & Objetivo</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+        <Field label="Nível atual" required error={errors.nivel}>
+          <Sel value={form.nivel} onChange={e=>set("nivel",e.target.value)} options={[
+            {v:"sedentario",l:"Sedentário"},{v:"iniciante",l:"Iniciante"},{v:"recreativo",l:"Recreativo"},
+            {v:"intermediario",l:"Intermediário"},{v:"avancado",l:"Avançado"}]}/>
+        </Field>
+        <Field label="Dias disponíveis/semana" required error={errors.dias}>
+          <Sel value={form.dias} onChange={e=>set("dias",e.target.value)} options={[
+            {v:"2",l:"2 dias"},{v:"3",l:"3 dias"},{v:"4",l:"4 dias"},{v:"5",l:"5 dias"},{v:"6",l:"6 dias"}]}/>
+        </Field>
+        <Field label="Objetivo principal" required error={errors.objetivo}>
+          <Sel value={form.objetivo} onChange={e=>set("objetivo",e.target.value)} options={[
+            {v:"5k",l:"Completar 5km"},{v:"10k",l:"Completar 10km"},{v:"21k",l:"Meia maratona"},
+            {v:"42k",l:"Maratona"},{v:"emagrecer",l:"Emagrecer / saúde"},{v:"melhorar_tempo",l:"Melhorar tempo"}]}/>
+        </Field>
+        <Field label="Tempo disponível/treino">
+          <Sel value={form.tempo} onChange={e=>set("tempo",e.target.value)} options={[
+            {v:"30",l:"~30 min"},{v:"45",l:"~45 min"},{v:"60",l:"~60 min"},{v:"90",l:"~90 min"}]}/>
+        </Field>
+      </div>
+      <Field label="Condições de saúde">
+        <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:4}}>
+          {saudeOpts.map(o=><Chip key={o} label={o} selected={saude.includes(o)} onClick={()=>toggle(saude,setSaude,o)}/>)}
+        </div>
+      </Field>
+      <div style={{marginTop:14}}>
+        <Field label="Onde costuma treinar">
+          <div style={{display:"flex",flexWrap:"wrap",gap:8,marginTop:4}}>
+            {localOpts.map(o=><Chip key={o} label={o} selected={local.includes(o)} onClick={()=>toggle(local,setLocal,o)}/>)}
+          </div>
+        </Field>
+      </div>
+      <div style={{marginTop:14}}>
+        <Field label="Observações adicionais">
+          <textarea value={form.obs} onChange={e=>set("obs",e.target.value)}
+            placeholder="Lesões antigas, metas específicas, restrições de horário..."
+            style={{...s.input,resize:"vertical",minHeight:80}}/>
+        </Field>
+      </div>
+      <div style={{marginTop:24}}>
+        <button style={{...s.btn("primary"),width:"100%"}} onClick={submit}>
+          {mesAtual>1?"Continuar para Reavaliação →":"Continuar para o Teste de 3km →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP 2: TESTE 3KM ───────────────────────────────────────
+function StepTeste({aluno,initialData,onNext,onBack,mesAtual,testeAnterior}){
+  const def=initialData||{};
+  const [tMin,setTMin]=useState(def.tMin||"");
+  const [tSeg,setTSeg]=useState(def.tSeg||"");
+  const [fcMaxReal,setFcMaxReal]=useState(def.fcMaxReal||"");
+  const [fcRepouso,setFcRepouso]=useState(def.fcRepouso||"");
+  const [timer,setTimer]=useState(0);
+  const [running,setRunning]=useState(false);
+  const [errors,setErrors]=useState({});
+  const [showGuide,setShowGuide]=useState(false);
+  const ref=useRef(null);
+
+  useEffect(()=>{
+    if(running){ref.current=setInterval(()=>setTimer(t=>t+1),1000);}
+    else{clearInterval(ref.current);}
+    return()=>clearInterval(ref.current);
+  },[running]);
+
+  const fmt=()=>{
+    const m=Math.floor(timer/60).toString().padStart(2,"0");
+    const sc=(timer%60).toString().padStart(2,"0");
+    return`${m}:${sc}`;
+  };
+  const stopFill=()=>{setRunning(false);if(!tMin)setTMin(String(Math.floor(timer/60)));if(!tSeg)setTSeg(String(timer%60));};
+  const min=parseInt(tMin)||0,seg=parseInt(tSeg)||0,totalSeg=min*60+seg;
+  const paceSeg=totalSeg>0?totalSeg/3:0;
+  const paceStr=paceSeg>0?`${Math.floor(paceSeg/60)}:${Math.round(paceSeg%60).toString().padStart(2,"0")}`:"--:--";
+  const fcMax=fcMaxReal?parseInt(fcMaxReal):aluno.fcMaxFormula;
+  const fcRep=fcRepouso?parseInt(fcRepouso):60;
+  const reserva=fcMax-fcRep;
+  const zona=(p1,p2)=>({min:Math.round(fcRep+reserva*p1),max:Math.round(fcRep+reserva*p2)});
+  const validate=()=>{
+    const e={};
+    if(!tMin&&!tSeg&&timer===0)e.tempo="Informe o tempo";
+    if(!fcRepouso)e.fcRepouso="Obrigatório";
+    setErrors(e);return Object.keys(e).length===0;
+  };
+  const submit=()=>{
+    if(!validate())return;
+    const zonas={z1:zona(.5,.6),z2:zona(.6,.7),z3:zona(.7,.8),z4:zona(.8,.9),z5:zona(.9,1)};
+    onNext({tMin:String(min),tSeg:String(seg),totalSeg,fcRepouso:fcRep,fcMaxReal:parseInt(fcMaxReal)||0,fcMax,reserva,paceStr,zonas,mes:mesAtual});
+  };
+
+  // Calcular evolução se houver teste anterior
+  const evolucao = testeAnterior && totalSeg>0
+    ? testeAnterior.totalSeg - totalSeg
+    : null;
+
+  return(
+    <div className="fade-in">
+      <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:"clamp(24px,6vw,36px)",fontWeight:800,lineHeight:1.1,marginBottom:8}}>
+        {mesAtual>1?"Reavaliação":"Teste de"} <span style={{color:C.orange}}>{mesAtual>1?"3km — Mês "+mesAtual:"3 km"}</span>
+      </h2>
+      <p style={{color:C.light,fontSize:14,marginBottom:16,lineHeight:1.6}}>
+        {mesAtual>1
+          ?"Vamos ver sua evolução! Corra 3km no melhor ritmo sustentável e compare com o mês anterior."
+          :"Corra 3km no seu melhor ritmo sustentável. Registre o tempo e sua FC ao final."}
+      </p>
+
+      {/* Resultado anterior */}
+      {testeAnterior&&(
+        <div style={{background:"rgba(75,123,255,.08)",border:"1px solid rgba(75,123,255,.2)",
+          borderRadius:12,padding:"14px 16px",marginBottom:16,display:"flex",gap:16,alignItems:"center",flexWrap:"wrap"}}>
+          <div>
+            <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>Resultado Anterior (Mês {mesAtual-1})</div>
+            <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,color:C.blue}}>
+              {testeAnterior.tMin}:{(testeAnterior.tSeg||"0").padStart(2,"0")}
+              <span style={{fontSize:12,color:C.muted,fontWeight:400}}> min · pace {testeAnterior.paceStr}/km</span>
+            </div>
+          </div>
+          {evolucao!==null&&evolucao>0&&(
+            <div style={{background:"rgba(46,204,113,.12)",border:"1px solid rgba(46,204,113,.3)",
+              borderRadius:10,padding:"8px 14px",textAlign:"center"}}>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:20,fontWeight:800,color:C.green}}>-{Math.floor(evolucao/60)}:{(evolucao%60).toString().padStart(2,"0")}</div>
+              <div style={{fontSize:10,color:C.green,textTransform:"uppercase",letterSpacing:1}}>evolução</div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Guia */}
+      <div style={{background:"rgba(255,107,53,.06)",border:"1px solid rgba(255,107,53,.2)",borderRadius:12,marginBottom:16,overflow:"hidden"}}>
+        <button onClick={()=>setShowGuide(!showGuide)} style={{width:"100%",padding:"13px 16px",background:"none",border:"none",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",fontFamily:"inherit",color:C.orange,fontWeight:700,fontSize:13}}>
+          <span>📋 Protocolo do Teste de 3km</span>
+          <span style={{transform:showGuide?"rotate(180deg)":"none",transition:"transform .3s"}}>▼</span>
+        </button>
+        {showGuide&&(
+          <div style={{padding:"0 16px 16px",borderTop:"1px solid rgba(255,107,53,.2)",paddingTop:14}}>
+            {[
+              "Aquecimento: 800m–1km de caminhada/trote leve + exercícios dinâmicos (canelinha, chutinho, rotação de quadril).",
+              "Corra 3km no ritmo mais forte que consegue sustentar do início ao fim — pace constante.",
+              "Não comece muito rápido! Distribua o esforço pelos 3km.",
+              "Ao cruzar os 3km: meça sua FC imediatamente — essa é sua FC Máxima Real.",
+              "FC de Repouso: meça pela manhã antes de levantar da cama."
+            ].map((txt,i)=>(
+              <div key={i} style={{display:"flex",gap:10,marginBottom:8,alignItems:"flex-start"}}>
+                <span style={{color:C.orange,fontWeight:800,flexShrink:0,marginTop:1}}>{i+1}.</span>
+                <span style={{fontSize:13,color:C.light,lineHeight:1.5}}>{txt}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Cronômetro */}
+      <div style={s.card({marginBottom:16,textAlign:"center",padding:"24px 16px"})}>
+        <div style={{fontSize:10,color:C.muted,letterSpacing:"2px",textTransform:"uppercase",marginBottom:10}}>Cronômetro do Teste</div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:52,fontWeight:800,letterSpacing:4,
+          color:running?C.orange:C.text,textShadow:running?"0 0 30px rgba(255,107,53,.4)":"none",transition:"color .3s"}}>{fmt()}</div>
+        <div style={{display:"flex",gap:10,justifyContent:"center",marginTop:14}}>
+          {!running
+            ?<button style={s.btn("primary")} onClick={()=>setRunning(true)}>▶ Iniciar</button>
+            :<button style={{...s.btn("danger"),border:"none"}} onClick={stopFill}>⏹ Parar</button>}
+          <button style={s.btn("ghost")} onClick={()=>{setRunning(false);setTimer(0);}}>Resetar</button>
+        </div>
+      </div>
+
+      {/* Campos */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:14}}>
+        <Field label="Tempo — Minutos" error={errors.tempo}><Inp type="number" placeholder="18" min="10" max="60" value={tMin} onChange={e=>setTMin(e.target.value)}/></Field>
+        <Field label="Tempo — Segundos"><Inp type="number" placeholder="30" min="0" max="59" value={tSeg} onChange={e=>setTSeg(e.target.value)}/></Field>
+        <Field label="FC ao final (bpm)"><Inp type="number" placeholder="185" min="100" max="230" value={fcMaxReal} onChange={e=>setFcMaxReal(e.target.value)}/></Field>
+        <Field label="FC de repouso (bpm)" required error={errors.fcRepouso} hint="Manhã, antes de levantar"><Inp type="number" placeholder="60" min="30" max="100" value={fcRepouso} onChange={e=>setFcRepouso(e.target.value)}/></Field>
+      </div>
+
+      {paceSeg>0&&(
+        <div style={{background:"rgba(255,107,53,.08)",border:"1px solid rgba(255,107,53,.2)",borderRadius:10,padding:"12px 16px",marginBottom:14,display:"flex",gap:12,alignItems:"center"}}>
+          <span style={{fontFamily:"'Syne',sans-serif",fontSize:26,fontWeight:800,color:C.orange}}>{paceStr}</span>
+          <div>
+            <div style={{fontSize:13,color:C.muted}}>min/km · Pace do teste</div>
+            {evolucao!==null&&evolucao>0&&<div style={{fontSize:12,color:C.green,fontWeight:700}}>✅ {Math.floor(evolucao/60)}:{(evolucao%60).toString().padStart(2,"0")} mais rápido!</div>}
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",gap:10,marginTop:20}}>
+        <button style={{...s.btn("ghost"),flex:1}} onClick={onBack}>← Voltar</button>
+        <button style={{...s.btn("primary"),flex:2}} onClick={submit}>Ver Zonas de FC →</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP 3: ZONAS FC ────────────────────────────────────────
+function StepZonas({aluno,teste,testeAnterior,onNext,onBack,mesAtual}){
+  const zonaData=[teste.zonas.z1,teste.zonas.z2,teste.zonas.z3,teste.zonas.z4,teste.zonas.z5];
+  return(
+    <div className="fade-in">
+      <h2 style={{fontFamily:"'Syne',sans-serif",fontSize:"clamp(24px,6vw,36px)",fontWeight:800,lineHeight:1.1,marginBottom:8}}>
+        Suas Zonas de <span style={{color:C.orange}}>FC</span>
+        {mesAtual>1&&<span style={{fontSize:16,color:C.muted}}> · Mês {mesAtual}</span>}
+      </h2>
+      <p style={{color:C.light,fontSize:14,marginBottom:16,lineHeight:1.6}}>Calculadas com Método Karvonen a partir dos seus dados reais.</p>
+
+      <div style={s.card({textAlign:"center",padding:"24px 16px",marginBottom:14,background:C.surface})}>
+        <div style={{fontSize:10,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:6}}>FC Máxima</div>
+        <div style={{fontFamily:"'Syne',sans-serif",fontSize:72,fontWeight:800,lineHeight:1,color:C.orange}}>{teste.fcMax}</div>
+        <div style={{fontSize:14,color:C.muted,marginTop:4}}>bpm</div>
+      </div>
+
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+        {[
+          {label:"FC Repouso",value:`${teste.fcRepouso} bpm`,color:C.blue},
+          {label:"Reserva FC",value:`${teste.reserva} bpm`,color:C.green},
+          {label:"Pace 3km",value:teste.paceStr+" /km",color:C.orange}
+        ].map(({label,value,color})=>(
+          <div key={label} style={s.card({textAlign:"center",padding:"12px 8px"})}>
+            <div style={{fontFamily:"'Syne',sans-serif",fontSize:18,fontWeight:800,color,lineHeight:1}}>{value}</div>
+            <div style={{fontSize:9,color:C.muted,textTransform:"uppercase",letterSpacing:1,marginTop:4}}>{label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Comparação com mês anterior */}
+      {testeAnterior&&(
+        <div style={{background:"rgba(75,123,255,.07)",border:"1px solid rgba(75,123,255,.2)",borderRadius:12,padding:"14px 16px",marginBottom:14}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:C.blue,marginBottom:10}}>📈 Evolução vs Mês {mesAtual-1}</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+            {[
+              {label:"Pace 3km",ant:testeAnterior.paceStr+" /km",novo:teste.paceStr+" /km",melhora:testeAnterior.totalSeg>teste.totalSeg},
+              {label:"FC Máxima",ant:testeAnterior.fcMax+" bpm",novo:teste.fcMax+" bpm",melhora:null},
+            ].map(({label,ant,novo,melhora})=>(
+              <div key={label} style={{background:C.surface,borderRadius:10,padding:"10px 12px"}}>
+                <div style={{fontSize:10,color:C.muted,marginBottom:4}}>{label}</div>
+                <div style={{fontSize:12,color:C.light,textDecoration:"line-through"}}>{ant}</div>
+                <div style={{fontSize:14,fontWeight:700,color:melhora?C.green:C.text}}>{novo} {melhora?"✅":""}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{fontSize:10,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:C.muted,marginBottom:10}}>5 Zonas de Treinamento</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+        {ZONES.map((zs,i)=>(
+          <div key={i} style={{background:zs.bg,border:`1px solid ${zs.border}`,borderRadius:12,padding:"12px 16px",
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{display:"flex",alignItems:"center",gap:12}}>
+              <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,color:zs.color,width:32}}>Z{i+1}</div>
+              <div>
+                <div style={{fontSize:12,fontWeight:700,color:zs.color}}>{zs.name}</div>
+                <div style={{fontSize:11,color:C.muted}}>{zs.desc}</div>
+              </div>
+            </div>
+            <div style={{textAlign:"right"}}>
+              <div style={{fontSize:16,fontWeight:800,color:zs.color}}>{zonaData[i].min}–{zonaData[i].max}</div>
+              <div style={{fontSize:10,color:C.muted}}>bpm</div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{background:"rgba(75,123,255,.08)",border:"1px solid rgba(75,123,255,.2)",borderRadius:10,padding:"12px 14px",fontSize:13,color:C.light,marginBottom:20}}>
+        💡 <strong>Método Karvonen:</strong> usa sua FC de repouso + FC máxima real para zonas mais precisas que a fórmula 220-idade.
+      </div>
+
+      <div style={{display:"flex",gap:10}}>
+        <button style={{...s.btn("ghost"),flex:1}} onClick={onBack}>← Voltar</button>
+        <button style={{...s.btn("primary"),flex:2}} onClick={onNext}>
+          {mesAtual>1?"Enviar Reavaliação →":"Enviar ao Professor →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── STEP 4: MEUS TREINOS ────────────────────────────────────
+function StepTreinos({aluno,teste,treinos,session,progresso,setProgresso,notify,onSyncProgress}){
+  const [activeWeek,setActiveWeek]=useState(0);
+  const [showUpload,setShowUpload]=useState(null);
+  const [stravaUrl,setStravaUrl]=useState("");
+  const [uploadNote,setUploadNote]=useState("");
+  const [saving,setSaving]=useState(false);
+  const [expandedTreino,setExpandedTreino]=useState(null);
+
+  const treinoKey=(si,ti)=>`${si}_${ti}`;
+
+  const marcarConcluido=async(si,ti)=>{
+    const key=treinoKey(si,ti);
+    const novo={...progresso};
+    if(novo[key]?.concluido){
+      delete novo[key].concluido;delete novo[key].concluidoEm;
+    } else {
+      novo[key]={...novo[key],concluido:true,concluidoEm:new Date().toISOString()};
+    }
+    setProgresso(novo);
+    await onSyncProgress(novo);
+    notify(novo[key]?.concluido===undefined?"Treino desmarcado":"✅ Treino concluído!");
+  };
+
+  const salvarComprovacao=async(si,ti)=>{
+    if(!stravaUrl.trim()&&!uploadNote.trim()){notify("Informe link ou nota.","error");return;}
+    setSaving(true);
+    const key=treinoKey(si,ti);
+    const novo={...progresso,[key]:{...progresso[key],strava:stravaUrl.trim(),nota:uploadNote.trim(),enviadoEm:new Date().toISOString()}};
+    setProgresso(novo);
+    await onSyncProgress(novo);
+    setShowUpload(null);setStravaUrl("");setUploadNote("");
+    notify("📎 Comprovação enviada ao professor!");
+    setSaving(false);
+  };
+
+  if(!treinos){
+    return(
+      <div className="fade-in">
+        <div style={{textAlign:"center",padding:"48px 20px"}}>
+          <div style={{fontSize:52,marginBottom:16}}>⏳</div>
+          <div style={{fontFamily:"'Syne',sans-serif",fontSize:22,fontWeight:800,marginBottom:8}}>
+            Aguardando seu <span style={{color:C.orange}}>Plano</span>
+          </div>
+          <div style={{fontSize:14,color:C.light,lineHeight:1.7,maxWidth:400,margin:"0 auto"}}>
+            Seus dados foram enviados! Assim que o professor liberar seu plano de treinos, ele aparece aqui automaticamente.
+          </div>
+          <div style={{marginTop:24,display:"flex",gap:8,justifyContent:"center",flexWrap:"wrap"}}>
+            {["rodagem","tiros","fartlek","longão"].map(t=>(
+              <div key={t} style={{padding:"6px 14px",borderRadius:20,background:"rgba(255,107,53,.1)",
+                border:"1px solid rgba(255,107,53,.2)",fontSize:12,color:C.orange,fontWeight:600}}>
+                {t}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const semanas=treinos.semanas||[];
+  const semanaAtual=semanas[activeWeek];
+  const total=semanas.reduce((a,s)=>a+s.treinos.filter(t=>t.tipo!=="descanso").length,0);
+  const feitos=Object.values(progresso).filter(v=>v.concluido).length;
+  const pct=total>0?Math.round(feitos/total*100):0;
+  const pctColor=pct>=80?C.green:pct>=50?C.yellow:C.orange;
+
+  return(
+    <div className="fade-in">
+      {/* Progresso geral */}
+      <div style={{background:"rgba(255,107,53,.05)",border:"1px solid rgba(255,107,53,.2)",borderRadius:14,padding:"18px 20px",marginBottom:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12,flexWrap:"wrap",gap:8}}>
+          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:C.muted}}>📊 Seu Progresso</div>
+          <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+            <span style={{fontFamily:"'Syne',sans-serif",fontSize:32,fontWeight:800,color:pctColor,lineHeight:1}}>{pct}</span>
+            <span style={{fontSize:14,color:C.muted,fontWeight:600}}>% · {feitos}/{total} treinos</span>
+          </div>
+        </div>
+        <div style={{background:"rgba(255,255,255,.06)",borderRadius:20,height:8,overflow:"hidden"}}>
+          <div style={{width:`${pct}%`,height:"100%",background:`linear-gradient(90deg,${pctColor},${pct>=80?"#27AE60":"#E67E22"})`,
+            borderRadius:20,transition:"width .6s ease"}}/>
+        </div>
+      </div>
+
+      {/* Info do plano */}
+      {treinos.objetivo&&(
+        <div style={{background:"rgba(75,123,255,.07)",border:"1px solid rgba(75,123,255,.2)",borderRadius:12,padding:"12px 16px",marginBottom:16,fontSize:13,color:C.light,lineHeight:1.6}}>
+          🎯 <strong>Objetivo:</strong> {treinos.objetivo}
+          {treinos.observacoes&&<> · {treinos.observacoes}</>}
+        </div>
+      )}
+
+      {/* Tabs de semanas */}
+      <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:4,marginBottom:16}}>
+        {semanas.map((sem,i)=>{
+          const semTotal=sem.treinos.filter(t=>t.tipo!=="descanso").length;
+          const semFeitos=sem.treinos.filter((t,ti)=>progresso[treinoKey(i,ti)]?.concluido).length;
+          const semPct=semTotal>0?Math.round(semFeitos/semTotal*100):0;
+          return(
+            <button key={i} onClick={()=>setActiveWeek(i)} style={{
+              flexShrink:0,padding:"10px 16px",borderRadius:10,border:"none",cursor:"pointer",
+              fontFamily:"inherit",fontWeight:700,fontSize:12,
+              background:activeWeek===i?`linear-gradient(135deg,${C.orange},${C.orangeD})`:"rgba(255,107,53,.08)",
+              color:activeWeek===i?"#fff":C.orange,
+              border:activeWeek===i?"none":"1px solid rgba(255,107,53,.2)",
+              boxShadow:activeWeek===i?"0 4px 14px rgba(255,107,53,.3)":"none",transition:"all .2s"}}>
+              Semana {sem.numero}
+              {semPct>0&&<div style={{fontSize:10,opacity:.8,marginTop:2}}>{semPct}%</div>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Semana atual */}
+      {semanaAtual&&(
+        <div>
+          {semanaAtual.foco&&(
+            <div style={{fontSize:13,color:C.light,marginBottom:14,padding:"10px 14px",
+              background:C.surface,borderRadius:10,border:`1px solid ${C.border}`}}>
+              🎯 <strong style={{color:C.orange}}>Foco da semana:</strong> {semanaAtual.foco}
+            </div>
+          )}
+
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            {semanaAtual.treinos.map((treino,ti)=>{
+              const key=treinoKey(activeWeek,ti);
+              const prog=progresso[key]||{};
+              const concluido=prog.concluido;
+              const isDescanso=treino.tipo==="descanso";
+              const info=TIPO_INFO[treino.tipo]||TIPO_INFO.rodagem;
+              const expanded=expandedTreino===key;
+
+              return(
+                <div key={ti} style={{background:concluido?"rgba(46,204,113,.05)":C.card,
+                  border:`1px solid ${concluido?"rgba(46,204,113,.25)":C.border}`,
+                  borderRadius:14,overflow:"hidden",transition:"all .2s"}}>
+
+                  {/* Header do treino */}
+                  <div style={{padding:"14px 16px",cursor:isDescanso?undefined:"pointer"}}
+                    onClick={()=>!isDescanso&&setExpandedTreino(expanded?null:key)}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10}}>
+                      <div style={{display:"flex",gap:10,alignItems:"flex-start",flex:1}}>
+                        <div style={{fontSize:22,flexShrink:0,marginTop:2}}>{info.emoji}</div>
+                        <div style={{flex:1}}>
+                          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:3}}>
+                            <span style={{fontWeight:800,fontSize:14,color:concluido?C.green:C.text}}>{treino.titulo||info.label}</span>
+                            {treino.zona&&<span style={{fontSize:10,fontWeight:700,padding:"2px 8px",borderRadius:20,
+                              background:`${info.color}18`,color:info.color,border:`1px solid ${info.color}33`}}>{treino.zona}</span>}
+                            {concluido&&<span style={{fontSize:10,fontWeight:700,color:C.green}}>✅</span>}
+                          </div>
+                          <div style={{fontSize:12,color:C.muted}}>{treino.dia}</div>
+                          {/* Distâncias e volumes */}
+                          <div style={{display:"flex",gap:12,marginTop:6,flexWrap:"wrap"}}>
+                            {treino.distancia&&<span style={{fontSize:12,fontWeight:700,color:info.color}}>📏 {treino.distancia}</span>}
+                            {treino.aquecimento&&<span style={{fontSize:11,color:C.muted}}>🔥 {treino.aquecimento} aquec.</span>}
+                            {treino.volta&&<span style={{fontSize:11,color:C.muted}}>❄️ {treino.volta} volta</span>}
+                          </div>
+                        </div>
+                      </div>
+                      {!isDescanso&&<span style={{color:C.muted,fontSize:12,flexShrink:0,marginTop:4}}>{expanded?"▲":"▼"}</span>}
+                    </div>
+                  </div>
+
+                  {/* Detalhes expandidos */}
+                  {expanded&&!isDescanso&&(
+                    <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 16px",background:C.surface}}>
+
+                      {/* Aquecimento */}
+                      {treino.aquecimentoDesc&&(
+                        <div style={{marginBottom:12}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:C.orange,marginBottom:6}}>🔥 Aquecimento</div>
+                          <div style={{fontSize:13,color:C.light,lineHeight:1.7,background:"rgba(255,107,53,.05)",border:"1px solid rgba(255,107,53,.15)",borderRadius:8,padding:"10px 12px"}}>
+                            {treino.aquecimentoDesc}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Descrição principal */}
+                      {treino.descricao&&(
+                        <div style={{marginBottom:12}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:info.color,marginBottom:6}}>📋 Execução</div>
+                          <div style={{fontSize:13,color:C.light,lineHeight:1.7,whiteSpace:"pre-line"}}>
+                            {treino.descricao}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Zonas/Ritmo */}
+                      {(treino.zonaDesc||treino.ritmo)&&(
+                        <div style={{marginBottom:12,background:`rgba(${info.color==="#2ECC71"?"46,204,113":info.color==="#3498DB"?"52,152,219":"241,196,15"},.06)`,border:`1px solid ${info.color}22`,borderRadius:8,padding:"10px 12px"}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:info.color,marginBottom:4}}>💓 Zona / Ritmo</div>
+                          <div style={{fontSize:13,color:C.light,lineHeight:1.6}}>{treino.zonaDesc||treino.ritmo}</div>
+                        </div>
+                      )}
+
+                      {/* Volta calma */}
+                      {treino.voltaDesc&&(
+                        <div style={{marginBottom:12}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:C.blue,marginBottom:6}}>❄️ Volta calma</div>
+                          <div style={{fontSize:13,color:C.light,lineHeight:1.7,background:"rgba(75,123,255,.05)",border:"1px solid rgba(75,123,255,.15)",borderRadius:8,padding:"10px 12px"}}>
+                            {treino.voltaDesc}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Dica do professor */}
+                      {treino.dica&&(
+                        <div style={{marginBottom:12,background:"rgba(155,89,182,.06)",border:"1px solid rgba(155,89,182,.2)",borderRadius:8,padding:"10px 12px"}}>
+                          <div style={{fontSize:10,fontWeight:700,letterSpacing:"1.5px",textTransform:"uppercase",color:C.purple,marginBottom:4}}>💡 Dica</div>
+                          <div style={{fontSize:13,color:C.light,lineHeight:1.6}}>{treino.dica}</div>
+                        </div>
+                      )}
+
+                      {/* Ações */}
+                      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginTop:14}}>
+                        <button onClick={()=>marcarConcluido(activeWeek,ti)}
+                          style={{...s.btn(concluido?"ghost":"success"),padding:"9px 16px",fontSize:12}}>
+                          {concluido?"↩ Desmarcar":"✅ Marcar concluído"}
+                        </button>
+                        {concluido&&(
+                          <button onClick={()=>{setShowUpload(key);setStravaUrl(prog.strava||"");setUploadNote(prog.nota||"");}}
+                            style={{...s.btn("ghost"),padding:"9px 16px",fontSize:12}}>
+                            {prog.strava||prog.nota?"✏️ Editar comprovação":"📎 Enviar comprovação"}
+                          </button>
+                        )}
+                      </div>
+
+                      {prog.concluidoEm&&(
+                        <div style={{fontSize:11,color:C.muted,marginTop:8}}>
+                          ✅ Concluído em {new Date(prog.concluidoEm).toLocaleDateString("pt-BR")}
+                        </div>
+                      )}
+                      {prog.strava&&(
+                        <div style={{fontSize:12,marginTop:6}}>
+                          🔗 <a href={prog.strava} target="_blank" rel="noopener noreferrer"
+                            style={{color:C.blue,textDecoration:"none"}}>{prog.strava.length>50?prog.strava.slice(0,50)+"…":prog.strava}</a>
+                        </div>
+                      )}
+                      {prog.nota&&<div style={{fontSize:12,color:C.light,marginTop:4}}>📝 {prog.nota}</div>}
+                    </div>
+                  )}
+
+                  {/* Formulário de comprovação */}
+                  {showUpload===key&&(
+                    <div style={{borderTop:`1px solid ${C.border}`,padding:"14px 16px",background:C.surface}}>
+                      <div style={{fontSize:12,fontWeight:700,color:C.orange,marginBottom:10}}>📎 Enviar Comprovação</div>
+                      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                        <Field label="Link Strava / Garmin / relógio" hint="Cole o link da atividade">
+                          <Inp placeholder="https://www.strava.com/activities/..." value={stravaUrl} onChange={e=>setStravaUrl(e.target.value)}/>
+                        </Field>
+                        <Field label="Nota para o professor">
+                          <textarea value={uploadNote} onChange={e=>setUploadNote(e.target.value)}
+                            placeholder="Como foi o treino? Sentiu alguma dificuldade?"
+                            style={{...s.input,resize:"vertical",minHeight:70,fontSize:13}}/>
+                        </Field>
+                        <div style={{display:"flex",gap:8}}>
+                          <button style={{...s.btn("ghost"),flex:1,fontSize:12}} onClick={()=>setShowUpload(null)}>Cancelar</button>
+                          <button style={{...s.btn("success"),flex:2,fontSize:12}} onClick={()=>salvarComprovacao(activeWeek,ti)} disabled={saving}>
+                            {saving?"Enviando...":"✅ Enviar"}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── MAIN APP ─────────────────────────────────────────────────
+function App(){
+  const [session,setSession]=useState(()=>{
+    try{return JSON.parse(localStorage.getItem("runcoach_aluno_session")||"null");}catch{return null;}
+  });
+  const [record,setRecord]=useState(null);
+  const [step,setStep]=useState(0);
+  const [completed,setCompleted]=useState(0);
+  const [aluno,setAluno]=useState(null);
+  const [teste,setTeste]=useState(null);
+  const [progresso,setProgresso]=useState({});
+  const [notif,setNotif]=useState(null);
+  const [mesAtual,setMesAtual]=useState(1);
+  const syncRef=useRef(null);
+
+  const notify=(msg,type="success")=>{setNotif({msg,type});setTimeout(()=>setNotif(null),3500);};
+
+  const syncPull=useCallback(async()=>{
+    if(!session)return;
+    try{
+      const data=await fbGet(session.dbUrl);
+      setRecord(data);
+      const minhaEntry=data.alunos?.[session.uid];
+      if(minhaEntry&&!aluno){
+        const alunoData=minhaEntry.aluno||null;
+        const testeData=minhaEntry.teste||minhaEntry.testeAtual||null;
+        setAluno(alunoData);
+        setTeste(testeData);
+        const mes=minhaEntry.mesAtual||1;
+        setMesAtual(mes);
+        if(alunoData&&testeData){setStep(3);setCompleted(3);}
+        else if(alunoData){setStep(1);setCompleted(1);}
+      }
+      const progBin=data.progresso?.[session.uid];
+      if(progBin)setProgresso(progBin);
+    }catch(e){}
+  },[session,aluno]);
+
+  useEffect(()=>{
+    if(!session)return;
+    syncPull();
+    syncRef.current=setInterval(syncPull,5000);
+    return()=>clearInterval(syncRef.current);
+  },[session,syncPull]);
+
+  const treinos=(record&&session)?(record.planos?.[session.uid]||null):null;
+
+  const onSyncProgress=async(novoProgresso)=>{
+    if(!session)return;
+    try{
+      await fbPatch(session.dbUrl,(latest)=>{
+        latest.progresso=latest.progresso||{};
+        latest.progresso[session.uid]=novoProgresso;
+        return latest;
+      });
+    }catch(e){
+      notify("Sincronização offline — dados salvos localmente.","error");
+      try{localStorage.setItem("runcoach_progress_offline_"+session.uid,JSON.stringify(novoProgresso));}catch{}
+    }
+  };
+
+  const enviarDadosAoProfessor=async(alunoData,testeData)=>{
+    if(!session)return;
+    try{
+      const payload={
+        aluno:alunoData,
+        teste:testeData,
+        testeAtual:testeData,
+        mesAtual,
+        uid:session.uid,
+        nome:session.nome,
+        email:session.email,
+        senha:session.senha,
+        enviadoEm:new Date().toISOString()
+      };
+      // Guardar histórico de testes
+      payload["teste_mes_"+mesAtual]=testeData;
+      await fbPatch(session.dbUrl,(latest)=>{
+        latest.alunos=latest.alunos||{};
+        const existing=latest.alunos[session.uid]||{};
+        latest.alunos[session.uid]={...existing,...payload};
+        return latest;
+      });
+      const updated=await fbGet(session.dbUrl);
+      setRecord(updated);
+      notify("✅ Dados enviados ao professor!");
+    }catch(e){
+      notify("Erro ao enviar. Verifique sua conexão.","error");
+    }
+  };
+
+  // Dados do teste anterior para comparação
+  const testeAnterior=record?.alunos?.[session?.uid]?.["teste_mes_"+(mesAtual-1)]||null;
+
+  const handleAluno=(data)=>{setAluno(data);setStep(1);setCompleted(c=>Math.max(c,1));};
+  const handleTeste=(data)=>{setTeste(data);setStep(2);setCompleted(c=>Math.max(c,2));};
+  const handleZonas=async()=>{
+    await enviarDadosAoProfessor(aluno,teste);
+    setStep(3);setCompleted(c=>Math.max(c,3));
+  };
+  const handleLogout=()=>{
+    setSession(null);setRecord(null);setStep(0);setCompleted(0);
+    setAluno(null);setTeste(null);setProgresso({});setMesAtual(1);
+  };
+
+  if(!session)return<ConexaoScreen onConnect={(cfg)=>setSession(cfg)}/>;
+
+  const whatsapp=treinos?.whatsapp||record?.config?.whatsapp;
+
+  return(
+    <div style={{background:C.bg,minHeight:"100vh",color:C.text,fontFamily:"'Manrope',sans-serif",padding:"24px 16px 100px"}}>
+      <Notify msg={notif?.msg} type={notif?.type}/>
+      <div style={{maxWidth:820,margin:"0 auto"}}>
+        <Header userName={session.nome} mesAtual={mesAtual} onLogout={handleLogout}/>
+
+        {!record&&(
+          <div style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:C.muted,marginBottom:16}}>
+            <span style={{display:"inline-block",animation:"spin 1s linear infinite"}}>⚙️</span>
+            Conectando ao espaço do professor...
+          </div>
+        )}
+
+        <StepNav step={step} setStep={(i)=>{if(i<=completed)setStep(i);}} completed={completed} mesAtual={mesAtual}/>
+
+        {step===0&&<StepPerfil initialData={aluno} onNext={handleAluno} mesAtual={mesAtual}/>}
+        {step===1&&aluno&&<StepTeste aluno={aluno} initialData={teste} onNext={handleTeste} onBack={()=>setStep(0)} mesAtual={mesAtual} testeAnterior={testeAnterior}/>}
+        {step===2&&aluno&&teste&&<StepZonas aluno={aluno} teste={teste} testeAnterior={testeAnterior} onNext={handleZonas} onBack={()=>setStep(1)} mesAtual={mesAtual}/>}
+        {step===3&&aluno&&teste&&(
+          <StepTreinos aluno={aluno} teste={teste} treinos={treinos} session={session}
+            progresso={progresso} setProgresso={setProgresso} notify={notify}
+            onSyncProgress={onSyncProgress}/>
+        )}
+      </div>
+
+      {/* Chatbot flutuante */}
+      <ChatBot whatsapp={whatsapp}/>
+    </div>
+  );
+}
+
+const root=ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);
+</script>
+</body>
+</html>
